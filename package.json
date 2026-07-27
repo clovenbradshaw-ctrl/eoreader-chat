@@ -1,0 +1,16 @@
+{
+  "name": "eoreader-chat",
+  "version": "1.0.0",
+  "description": "Infinite memory chat using eoreader5 semantic engine",
+  "main": "memory-server.py",
+  "scripts": {
+    "start": "python3 memory-server.py",
+    "extract": "python3 -c \"from memory_server import extract_text_from_url; print(extract_text_from_url('https://example.com'))\""
+  },
+  "dependencies": {
+    "eoreader5": "git+https://github.com/clovenbradshaw-ctrl/eoreader5.git"
+  },
+  "keywords": ["eoreader", "semantic-engine", "chat", "infinite-memory"],
+  "author": "",
+  "license": "MIT"
+}
