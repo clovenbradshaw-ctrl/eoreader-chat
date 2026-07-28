@@ -1174,99 +1174,99 @@ async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, force
   };
 
   try {
-  for (let round = 0; round < maxRounds; round++) {
-    const body = {
-      model,
-      messages,
-      tools: effectiveTools,
-      stream: false,
-      options: { temperature: 0.7, num_predict: 4096 },
-    };
+    for (let round = 0; round < maxRounds; round++) {
+      const body = {
+        model,
+        messages,
+        tools: effectiveTools,
+        stream: false,
+        options: { temperature: 0.7, num_predict: 4096 },
+      };
 
-    if (onEvent) onEvent({ type: "llm_call", round, tools: effectiveTools.length, model });
+      if (onEvent) onEvent({ type: "llm_call", round, tools: effectiveTools.length, model });
 
-    const resp = await withRetry(() => safeFetch(`${TARGET}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 120000), { label: "Ollama chat", maxRetries: 2 });
+      const resp = await withRetry(() => safeFetch(`${TARGET}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }, 120000), { label: "Ollama chat", maxRetries: 2 });
 
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => resp.statusText);
-      throw new Error(`Ollama ${resp.status}: ${errText}`);
-    }
-
-    const data = await resp.json();
-    const msg = data.message || {};
-
-    if (!msg.tool_calls || msg.tool_calls.length === 0) {
-      messages.push({ role: "assistant", content: msg.content || "" });
-      if (onEvent) onEvent({ type: "response", content: msg.content || "", model });
-      await revealOutcome("success");
-      return msg.content || "";
-    }
-
-    const toolCalls = msg.tool_calls.map(tc => ({
-      id: tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      type: "function",
-      function: { name: tc.function?.name || tc.name, arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function?.arguments || {}) },
-    }));
-
-    if (onEvent) onEvent({ type: "tool_calls", calls: toolCalls.map(tc => ({ name: tc.function.name, args: tc.function.arguments })) });
-
-    messages.push({ role: "assistant", content: msg.content || "", tool_calls: toolCalls });
-
-    for (const tc of msg.tool_calls) {
-      const name = tc.function?.name || tc.name;
-      let args = {};
-      try { args = typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}); } catch {}
-
-      console.error(`[proxy] Tool call: ${name}(${JSON.stringify(args).slice(0, 200)})`);
-
-      let result;
-      const isMcp = name.startsWith("mcp_");
-
-      if (isMcp) {
-        const serverName = name.split("_")[1];
-        const toolName = name.split("_").slice(2).join("_");
-        const client = mcpClients.get(serverName);
-        if (client) {
-          try { result = await client.callTool(name, args); }
-          catch (err) { result = `[MCP error: ${err.message}]`; }
-        } else {
-          result = `[MCP server "${serverName}" not connected]`;
-        }
-      } else {
-        const handler = toolHandlers[name];
-        if (handler) {
-          try { result = await handler(args); }
-          catch (err) { result = `[Error calling ${name}: ${err.message}]`; }
-        } else {
-          result = `[Unknown tool: ${name}]`;
-        }
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => resp.statusText);
+        throw new Error(`Ollama ${resp.status}: ${errText}`);
       }
 
-      const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-      store.ingest(`Tool ${name}: ${resultStr.slice(0, 300)}`, "tool", { name });
+      const data = await resp.json();
+      const msg = data.message || {};
 
-      if (onEvent) onEvent({ type: "tool_result", name, result: resultStr.slice(0, 500) });
+      if (!msg.tool_calls || msg.tool_calls.length === 0) {
+        messages.push({ role: "assistant", content: msg.content || "" });
+        if (onEvent) onEvent({ type: "response", content: msg.content || "", model });
+        await revealOutcome("success");
+        return msg.content || "";
+      }
 
-      messages.push({
-        role: "tool",
-        content: resultStr.slice(0, 10000),
-        tool_call_id: tc.id || `call_${Date.now()}`,
-      });
+      const toolCalls = msg.tool_calls.map(tc => ({
+        id: tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        type: "function",
+        function: { name: tc.function?.name || tc.name, arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function?.arguments || {}) },
+      }));
+
+      if (onEvent) onEvent({ type: "tool_calls", calls: toolCalls.map(tc => ({ name: tc.function.name, args: tc.function.arguments })) });
+
+      messages.push({ role: "assistant", content: msg.content || "", tool_calls: toolCalls });
+
+      for (const tc of msg.tool_calls) {
+        const name = tc.function?.name || tc.name;
+        let args = {};
+        try { args = typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}); } catch {}
+
+        console.error(`[proxy] Tool call: ${name}(${JSON.stringify(args).slice(0, 200)})`);
+
+        let result;
+        const isMcp = name.startsWith("mcp_");
+
+        if (isMcp) {
+          const serverName = name.split("_")[1];
+          const toolName = name.split("_").slice(2).join("_");
+          const client = mcpClients.get(serverName);
+          if (client) {
+            try { result = await client.callTool(name, args); }
+            catch (err) { result = `[MCP error: ${err.message}]`; }
+          } else {
+            result = `[MCP server "${serverName}" not connected]`;
+          }
+        } else {
+          const handler = toolHandlers[name];
+          if (handler) {
+            try { result = await handler(args); }
+            catch (err) { result = `[Error calling ${name}: ${err.message}]`; }
+          } else {
+            result = `[Unknown tool: ${name}]`;
+          }
+        }
+
+        const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+        store.ingest(`Tool ${name}: ${resultStr.slice(0, 300)}`, "tool", { name });
+
+        if (onEvent) onEvent({ type: "tool_result", name, result: resultStr.slice(0, 500) });
+
+        messages.push({
+          role: "tool",
+          content: resultStr.slice(0, 10000),
+          tool_call_id: tc.id || `call_${Date.now()}`,
+        });
+      }
     }
-  }
 
-  const last = messages[messages.length - 1];
-  if (last?.role === "tool") {
-    messages.push({ role: "assistant", content: "[Max tool rounds reached. Please continue based on the results above.]" });
-  }
-  const finalContent = messages[messages.length - 1]?.content || "";
-  if (onEvent) onEvent({ type: "response", content: finalContent, model });
-  await revealOutcome("failure");
-  return finalContent;
+    const last = messages[messages.length - 1];
+    if (last?.role === "tool") {
+      messages.push({ role: "assistant", content: "[Max tool rounds reached. Please continue based on the results above.]" });
+    }
+    const finalContent = messages[messages.length - 1]?.content || "";
+    if (onEvent) onEvent({ type: "response", content: finalContent, model });
+    await revealOutcome("failure");
+    return finalContent;
   } catch (err) {
     await revealOutcome("failure");
     throw err;
@@ -1337,6 +1337,13 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/v1/models") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ tiny: TINY_MODEL, medium: MEDIUM_MODEL }));
+    return;
+  }
+
+  // Learned model-router state (competency ledger snapshot, read-only)
+  if (req.method === "GET" && req.url === "/v1/router") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(modelRouter ? modelRouter.describe() : { error: "model-router unavailable" }));
     return;
   }
 
