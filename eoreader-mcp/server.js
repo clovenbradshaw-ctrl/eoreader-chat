@@ -9,8 +9,8 @@
  *
  * Tools: fetch_url, read_file, read_text, ingest, scout, fold,
  * search_memory, list_documents, get_memory_state, think, plan,
- * speak, craft, evaluate, revise, cite, compile, steer, patch,
- * set_focus, set_lens.
+ * speak, craft, grow, evaluate, revise, cite, compile, steer, patch,
+ * set_focus, set_lens, chat_turn, chat_stats, chat_clear.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -21,8 +21,10 @@ import path from "path";
 import * as engine from "./lib/engine-bridge.js";
 import * as model from "./lib/model-bridge.js";
 import * as log from "./lib/log.js";
+import * as chatHistory from "./lib/chat-history.js";
 import { sweep, worstWindows, uncoveredTarget } from "./lib/sweep.js";
 import { patchLoop } from "./lib/patch-loop.js";
+import { grow as growArtifact } from "./lib/grow.js";
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 const CRAFT_MODEL = process.env.CRAFT_MODEL || "qwen2.5-coder:7b";
@@ -47,6 +49,21 @@ function notifyProgress(progressToken, message, percentage) {
       jsonrpc: "2.0",
       method: "notifications/progress",
       params: { progressToken, progress: { message, percentage } },
+    }).catch(() => {});
+  }
+}
+
+// Stream a token to the client via MCP notifications/message.
+// Used by speak and chat_turn to deliver partial results during generation.
+function notifyToken(session, token) {
+  if (transportRef) {
+    transportRef.send({
+      jsonrpc: "2.0",
+      method: "notifications/message",
+      params: {
+        level: "info",
+        data: JSON.stringify({ type: "token", session, token }),
+      },
     }).catch(() => {});
   }
 }
@@ -136,7 +153,7 @@ server.tool(
   },
   async ({ file_path, session, tags }) => {
     try {
-      const result = engine.ingestFile(file_path, session);
+      const result = await engine.ingestFile(file_path, session);
       log.write({ type: "read_file", layer: 1, session, path: file_path, chunks: result.chunks, tags: tags || [] });
       return jsonResult({ path: file_path, chunks: result.chunks });
     } catch (err) {
@@ -187,14 +204,58 @@ server.tool(
       const stats = fs.statSync(targetPath);
       let result;
       if (stats.isDirectory()) {
-        result = engine.ingestDir(targetPath, session, extensions);
+        result = await engine.ingestDir(targetPath, session, extensions);
       } else {
-        result = engine.ingestFile(targetPath, session);
+        result = await engine.ingestFile(targetPath, session);
       }
       log.write({ type: "ingest", layer: 1, session, path: targetPath, chunks: result.chunks });
       return jsonResult({ path: targetPath, chunks: result.chunks });
     } catch (err) {
       return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// ingest_binary — ingest binary files with CV model support
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "ingest_binary",
+  "Ingest any binary file (images, audio, video, documents). Extracts metadata and runs CV model for images. Returns searchable text representation.",
+  {
+    file_path: z.string().describe("Absolute path to the binary file"),
+    session: z.string().describe("Session ID"),
+    caption: z.string().optional().describe("User-provided description (optional, used for images)"),
+    model: z.string().optional().describe("Vision model to use (default: llava:13b)"),
+    skip_cv: z.boolean().optional().describe("Skip CV model, metadata only"),
+  },
+  async ({ file_path, session, caption, model, skip_cv }) => {
+    try {
+      const result = await engine.ingestBinary(file_path, session, {
+        caption,
+        model,
+        skipCV: skip_cv,
+      });
+      log.write({ 
+        type: "ingest_binary", 
+        layer: 1, 
+        session, 
+        path: file_path, 
+        ext: result.ext,
+        chunks: result.chunks,
+        has_caption: !!caption,
+        cv_used: !skip_cv,
+      });
+      return jsonResult({ 
+        path: file_path, 
+        ext: result.ext,
+        chunks: result.chunks, 
+        signal_length: result.signal_length,
+        preview: result.preview,
+      });
+    } catch (err) {
+      return textResult(`Error ingesting binary: ${err.message}`);
     }
   }
 );
@@ -382,7 +443,8 @@ server.tool(
   },
   async ({ query, summary, session, round }) => {
     try {
-      const result = await model.think(query, summary, round || 1);
+      const ctx = chatHistory.getContext(session);
+      const result = await model.think(query, summary, round || 1, ctx);
       const entry = log.write({ type: "think", layer: 3, session, query, round: round || 1, sufficient: result.sufficient, evidence: result.evidence, gap: result.gap });
       return jsonResult({ ...result, log_id: entry.id });
     } catch (err) {
@@ -405,7 +467,8 @@ server.tool(
   async ({ query, session }) => {
     try {
       const priorPlan = log.latest({ type: "plan", session, superseded: false });
-      const result = await model.plan(session, log, query, priorPlan?.text || null);
+      const ctx = chatHistory.getContext(session);
+      const result = await model.plan(session, log, query, priorPlan?.text || null, ctx);
       const entry = log.write({ type: "plan", layer: 2, session, query, text: result, supersedes: priorPlan?.id || null });
       return textResult(result);
     } catch (err) {
@@ -451,6 +514,44 @@ server.tool(
 );
 
 // ══════════════════════════════════════════════════════════════
+// grow — holonic recursive fold generation (REC/Paradigm/Cultivating)
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "grow",
+  "REC/Paradigm/Cultivating — holonic recursive fold generator. Takes a short seed and grows it into a complete artifact through recursive fold-compressed generation. Never cuts off: decomposes the seed into a task tree, generates each piece with fold-compressed context, validates each piece, retries on failure. The fundamental unit of longform generation.",
+  {
+    seed: z.string().describe("Short seed specification — what to build. Examples: 'reddit for dolphin lovers', 'personal homepage with dark theme'"),
+    file_type: z.string().optional().describe("Type of artifact to generate (default: html)"),
+    session: z.string().describe("Session ID"),
+    output_path: z.string().optional().describe("Where to write the final artifact"),
+    max_tasks: z.number().optional().describe("Max sub-tasks to generate (default 20, safety limit)"),
+  },
+  async ({ seed, file_type, session, output_path, max_tasks }) => {
+    try {
+      const result = await growArtifact(seed, {
+        fileType: file_type || "html",
+        outputPath: output_path || null,
+        session: session || "default",
+        maxTasks: max_tasks || 20,
+      });
+      return jsonResult({
+        ok: result.ok,
+        pieces: result.pieces?.length || 0,
+        total_chars: result.stats?.totalChars || 0,
+        duration: result.stats?.duration || "0s",
+        errors: result.errors || [],
+        final_validation: result.finalValidation,
+        output_path: result.outputPath,
+        preview: result.assembled?.slice(0, 2000) || "",
+      });
+    } catch (err) {
+      return textResult(`Grow error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
 // speak — generate answer from verified fold (DEF)
 // ══════════════════════════════════════════════════════════════
 
@@ -465,7 +566,10 @@ server.tool(
   },
   async ({ query, summary, session, format }) => {
     try {
-      const result = await model.speak(query, summary, format || "direct");
+      const ctx = chatHistory.getContext(session);
+      const result = await model.speak(query, summary, format || "direct", ctx, {
+        onToken: (token) => notifyToken(session, token),
+      });
       log.write({ type: "answer", layer: 3, session, query, text: result.slice(0, 1000) });
       return textResult(result);
     } catch (err) {
@@ -490,7 +594,8 @@ server.tool(
       const answer = answer_id ? log.read({ id: answer_id })[0] : log.latest({ type: "answer", session });
       if (!answer) return textResult("No answer to evaluate.");
       const evidence = answer.text || "(no evidence)";
-      const result = await model.evaluate(answer.text, evidence);
+      const ctx = chatHistory.getContext(session);
+      const result = await model.evaluate(answer.text, evidence, ctx);
       log.write({ type: "evaluate", layer: 3, session, parent: answer.id, passes: result.passes, findings: result.findings });
       return jsonResult(result);
     } catch (err) {
@@ -517,7 +622,8 @@ server.tool(
         : log.latest({ type: "evaluate", session, passes: false });
       if (!evalEntry) return textResult("No failed evaluation to revise from.");
       const planEntry = log.latest({ type: "plan", session, superseded: false });
-      const result = await model.revise(session, log, evalEntry, planEntry?.text || null);
+      const ctx = chatHistory.getContext(session);
+      const result = await model.revise(session, log, evalEntry, planEntry?.text || null, ctx);
       log.write({ type: "revise", layer: 3, session, parent: evalEntry.id, text: result });
       return textResult(result);
     } catch (err) {
@@ -729,7 +835,7 @@ server.tool(
 
       if (source_path) {
         notifyProgress(progressToken, `Ingesting ${source_path}...`, 10);
-        const result = engine.ingestFile(source_path, session);
+        const result = await engine.ingestFile(source_path, session);
         log_entries.push(`ingest_file: ${result.chunks} chunks from ${source_path}`);
       }
 
@@ -769,7 +875,8 @@ server.tool(
 
         // Think
         notifyProgress(progressToken, `Round ${round}: verifying evidence sufficiency...`, pct + 10);
-        const thinkResult = await model.think(query, finalSummary, round);
+        const pipelineThinkCtx = chatHistory.getContext(session);
+        const thinkResult = await model.think(query, finalSummary, round, pipelineThinkCtx);
         sufficient = thinkResult.sufficient;
         log.write({ type: "think", layer: 3, session, query, round, sufficient, evidence: thinkResult.evidence, gap: thinkResult.gap });
         log_entries.push(`round ${round}: think sufficient=${sufficient}`);
@@ -789,8 +896,11 @@ server.tool(
       // Phase 4: Speak
       notifyProgress(progressToken, "Generating answer...", 80);
       let answer;
+      const pipelineCtx = chatHistory.getContext(session);
       if (sufficient && finalSummary) {
-        answer = await model.speak(query, finalSummary, format || "direct");
+        answer = await model.speak(query, finalSummary, format || "direct", pipelineCtx, {
+          onToken: (token) => notifyToken(session, token),
+        });
       } else {
         answer = `[After ${rounds} rounds, insufficient evidence found. Partial summary:\n${(finalSummary || "none").slice(0, 500)}]`;
       }
@@ -823,12 +933,17 @@ server.tool(
       notifyProgress(progressToken, "Evaluating provenance...", 95);
       let evaluation = null;
       if (finalSummary) {
-        evaluation = await model.evaluate(answer, finalSummary);
+        const evalCtx = chatHistory.getContext(session);
+        evaluation = await model.evaluate(answer, finalSummary, evalCtx);
         log.write({ type: "evaluate", layer: 3, session, passes: evaluation.passes, findings: evaluation.findings });
         log_entries.push(`evaluate: passes=${evaluation.passes}`);
       }
 
       notifyProgress(progressToken, "Done", 100);
+
+      // Record the pipeline's Q&A in chat history for future context
+      chatHistory.addMessage(session, "user", query);
+      chatHistory.addMessage(session, "assistant", answer.slice(0, 500));
 
       return jsonResult({
         answer,
@@ -846,6 +961,659 @@ server.tool(
 );
 
 // ══════════════════════════════════════════════════════════════
+// chat_turn — conversational turn with rolling context fold
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "chat_turn",
+  "Record a user message and get an assistant response with rolling conversation context. Auto-folds old turns into summaries when context budget fills. Automatically searches ingested material for grounding and binds citations to the response.",
+  {
+    session: z.string().describe("Session ID"),
+    message: z.string().describe("The user's message"),
+  },
+  async ({ session, message }) => {
+    try {
+      // ── Auto-scout: search ingested material for grounding ──
+      let sourceContext = null;
+      let sourcePassages = [];
+      try {
+        const scoutResult = engine.searchQuery(message, 8);
+        if (scoutResult.passages && scoutResult.passages.length > 0) {
+          sourcePassages = scoutResult.passages;
+          // Fold passages into a compact summary for the model
+          const foldResult = engine.foldUnits(
+            scoutResult.passages.map(p => ({ text: p.text, source: p.source })),
+            message, 800, 8
+          );
+          if (foldResult.summary) {
+            sourceContext = foldResult.summary;
+          }
+        }
+      } catch {}
+
+      // ── Generate response (grounded if source material was found) ──
+      const result = await model.chatTurn(session, message, chatHistory, {
+        onToken: (token) => notifyToken(session, token),
+        sourceContext,
+      });
+
+      // ── Auto-cite: mechanically bind assertions to sources ──
+      const citations = [];
+      const grounded = !!sourceContext;
+      if (sourcePassages.length > 0 && result.response) {
+        const sents = result.response.split(/(?<=[.?!])\s+/).filter(s => s.length > 20);
+        for (const sent of sents) {
+          const terms = extractKeyTerms(sent);
+          if (terms.length < 2) continue;
+          let best = null, bestScore = 0;
+          for (const src of sourcePassages) {
+            const srcLower = (src.text || "").toLowerCase();
+            let matchCount = 0;
+            for (const t of terms) { if (srcLower.includes(t)) matchCount++; }
+            if (matchCount > bestScore) { bestScore = matchCount; best = src; }
+          }
+          if (best && bestScore >= 2) {
+            citations.push({
+              sentence: sent.slice(0, 120),
+              source: best.source || "",
+              score: bestScore,
+            });
+          }
+        }
+      }
+
+      log.write({
+        type: "chat_turn", layer: 3, session,
+        message: message.slice(0, 200),
+        response: result.response.slice(0, 200),
+        folds: result.stats.foldCount,
+        grounded,
+        citations: citations.length,
+      });
+
+      return jsonResult({
+        response: result.response,
+        grounded,
+        citations,
+        stats: {
+          messages: result.stats.messageCount,
+          folds: result.stats.foldCount,
+          context_usage: result.stats.usagePercent + "%",
+          tokens: result.stats.tokens,
+        },
+      });
+    } catch (err) {
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// chat_stats — show session conversation context usage
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "chat_stats",
+  "Show conversation context stats for a session: message count, fold count, context usage percentage, tokens used.",
+  {
+    session: z.string().describe("Session ID"),
+  },
+  async ({ session }) => {
+    try {
+      const stats = chatHistory.getSessionStats(session);
+      return jsonResult(stats);
+    } catch (err) {
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// chat_clear — reset session conversation history
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "chat_clear",
+  "Clear a session's conversation history and fold state. Fresh start.",
+  {
+    session: z.string().describe("Session ID"),
+  },
+  async ({ session }) => {
+    try {
+      chatHistory.clearSession(session);
+      return textResult(`Session ${session} cleared.`);
+    } catch (err) {
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// bash — run shell commands
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "bash",
+  "Execute a shell command. Returns stdout and stderr. Use for git, npm, ls, find, and other CLI operations.",
+  {
+    command: z.string().describe("The bash command to execute"),
+    workdir: z.string().optional().describe("Working directory (defaults to cwd)"),
+    timeout: z.number().optional().describe("Timeout in milliseconds (default 120000)"),
+  },
+  async ({ command, workdir, timeout }) => {
+    const { execSync } = await import("child_process");
+    try {
+      const result = execSync(command, {
+        cwd: workdir || process.cwd(),
+        timeout: timeout || 120000,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024 * 10,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      return textResult(result || "(no output)");
+    } catch (err) {
+      const out = err.stdout || "";
+      const errOut = err.stderr || err.message;
+      return textResult(out ? `${out}\n\nSTDERR:\n${errOut}` : `Error: ${errOut}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// read_content — read file contents (raw, no engine ingest)
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "read_content",
+  "Read a file from disk and return its contents. Does NOT ingest into engine — use read_file for that. Supports offset/limit for large files.",
+  {
+    file_path: z.string().describe("Absolute path to the file"),
+    offset: z.number().optional().describe("Line number to start from (1-indexed, default 1)"),
+    limit: z.number().optional().describe("Max lines to return (default 2000)"),
+  },
+  async ({ file_path, offset, limit }) => {
+    try {
+      const content = fs.readFileSync(file_path, "utf8");
+      const lines = content.split("\n");
+      const start = Math.max(0, (offset || 1) - 1);
+      const end = Math.min(lines.length, start + (limit || 2000));
+      const slice = lines.slice(start, end);
+      const numbered = slice.map((line, i) => `${start + i + 1}: ${line}`).join("\n");
+      const total = lines.length;
+      const meta = end < total ? `\n\n(Showing ${start + 1}-${end} of ${total} lines)` : `\n\n(${total} lines total)`;
+      return textResult(numbered + meta);
+    } catch (err) {
+      return textResult(`Error reading ${file_path}: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// glob_files — find files by pattern
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "glob_files",
+  "Find files matching a glob pattern. Returns matching file paths.",
+  {
+    pattern: z.string().describe("Glob pattern (e.g. '**/*.js', 'src/**/*.ts')"),
+    path: z.string().optional().describe("Directory to search in (defaults to cwd)"),
+  },
+  async ({ pattern, path: searchPath }) => {
+    const { globSync } = await import("glob");
+    try {
+      const matches = globSync(pattern, {
+        cwd: searchPath || process.cwd(),
+        absolute: true,
+        nodir: true,
+        ignore: ["**/node_modules/**", "**/.git/**"],
+      });
+      if (!matches.length) return textResult("No files found matching that pattern.");
+      return textResult(matches.join("\n"));
+    } catch (err) {
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// grep_files — search file contents by regex
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "grep_files",
+  "Search file contents using a regex pattern. Returns matching lines with file paths and line numbers.",
+  {
+    pattern: z.string().describe("Regex pattern to search for"),
+    path: z.string().optional().describe("Directory to search in (defaults to cwd)"),
+    include: z.string().optional().describe("File pattern to include (e.g. '*.js', '*.{ts,tsx}')"),
+  },
+  async ({ pattern, path: searchPath, include }) => {
+    const { execSync } = await import("child_process");
+    try {
+      const dir = searchPath || ".";
+      const includeFlag = include ? `--include='${include}'` : "";
+      const cmd = `grep -rn ${includeFlag} --exclude-dir=node_modules --exclude-dir=.git '${pattern.replace(/'/g, "'\\''")}' "${dir}" | head -100`;
+      const result = execSync(cmd, { encoding: "utf8", timeout: 30000 });
+      return textResult(result || "No matches found.");
+    } catch (err) {
+      if (err.status === 1) return textResult("No matches found.");
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// edit_file — edit a file via string replacement
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "edit_file",
+  "Edit a file by replacing an exact string match with new content. The old_string must match exactly.",
+  {
+    file_path: z.string().describe("Absolute path to the file"),
+    old_string: z.string().describe("Exact string to find and replace"),
+    new_string: z.string().describe("Replacement string"),
+  },
+  async ({ file_path, old_string, new_string }) => {
+    try {
+      const content = fs.readFileSync(file_path, "utf8");
+      if (!content.includes(old_string)) {
+        return textResult(`Error: old_string not found in ${file_path}`);
+      }
+      const updated = content.replace(old_string, new_string);
+      fs.writeFileSync(file_path, updated, "utf8");
+      const occurrences = content.split(old_string).length - 1;
+      return textResult(`Replaced ${occurrences} occurrence(s) in ${file_path}`);
+    } catch (err) {
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// write_file — write content to a file
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "write_file",
+  "Write content to a file. Creates parent directories if needed. Overwrites existing content.",
+  {
+    file_path: z.string().describe("Absolute path to the file"),
+    content: z.string().describe("Content to write"),
+  },
+  async ({ file_path, content }) => {
+    try {
+      const dir = path.dirname(file_path);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file_path, content, "utf8");
+      return textResult(`Written ${content.length} bytes to ${file_path}`);
+    } catch (err) {
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// fetch_webpage — fetch URL, return raw text (no engine ingest)
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "fetch_webpage",
+  "Fetch a URL and return readable text content. Strips HTML tags and scripts. Does NOT ingest into engine — use fetch_url for that.",
+  {
+    url: z.string().describe("URL to fetch"),
+    format: z.string().optional().describe("Return format: text (default) or markdown"),
+  },
+  async ({ url, format }) => {
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": "EOReader/1.0" },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      const contentType = res.headers.get("content-type") || "";
+      const raw = await res.text();
+      let text;
+      if (contentType.includes("text/html") || raw.trim().startsWith("<")) {
+        text = stripHtml(raw);
+      } else {
+        text = raw;
+      }
+      return textResult(text.slice(0, 50000));
+    } catch (err) {
+      return textResult(`Error fetching ${url}: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// snip — extract contiguous range from source file
+// ══════════════════════════════════════════════════════════════
+
+const HEADING_PATTERN = /^(?:(?:Chapter|CHAPTER|Capítulo|CAPÍTULO|Kapitulua|KAPITULUA|Letter|LETTER)\s+\d+|Book|BOOK|Part|PART)\b.*$/m;
+
+function parseSourcePath(source) {
+  const m = source.match(/^source:(.+?)(?::chunk-\d+)?$/);
+  return m ? m[1] : source;
+}
+
+function findNextHeading(lines, startIdx) {
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (HEADING_PATTERN.test(lines[i])) return i;
+  }
+  return lines.length;
+}
+
+function trimToLength(text, lengthSpec) {
+  if (!lengthSpec) return text;
+  const paragraphs = text.split(/\n\s*\n/);
+
+  const wordCount = (s) => s.split(/\s+/).filter(Boolean).length;
+
+  // "N words"
+  const wordMatch = lengthSpec.match(/^(\d+)\s*words?$/i);
+  if (wordMatch) {
+    const target = parseInt(wordMatch[1]);
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length <= target) return text;
+    return words.slice(0, target).join(" ") + " […]";
+  }
+
+  // "N paragraphs"
+  const paraMatch = lengthSpec.match(/^(\d+)\s*paragraphs?$/i);
+  if (paraMatch) {
+    const n = parseInt(paraMatch[1]);
+    return paragraphs.slice(0, n).join("\n\n");
+  }
+
+  // "N lines"
+  const lineMatch = lengthSpec.match(/^(\d+)\s*lines?$/i);
+  if (lineMatch) {
+    const n = parseInt(lineMatch[1]);
+    const lines = text.split("\n");
+    return lines.slice(0, n).join("\n");
+  }
+
+  switch (lengthSpec.toLowerCase()) {
+    case "brief":
+    case "short":
+      // ~1 paragraph or ~100 words
+      const first = paragraphs[0];
+      if (first && wordCount(first) <= 200) return first;
+      return paragraphs.slice(0, Math.ceil(paragraphs.length * 0.15)).join("\n\n");
+
+    case "normal":
+    case "medium":
+      // ~3 paragraphs or ~500 words
+      const nParas = Math.min(3, paragraphs.length);
+      return paragraphs.slice(0, nParas).join("\n\n");
+
+    case "full":
+    case "long":
+    case "complete":
+      return text;
+
+    default:
+      return text;
+  }
+}
+
+// Generate search keys from a vague description using the model
+async function generateSearchKeys(about) {
+  try {
+    const result = await model.callModel("llama3.2", [
+      {
+        role: "system",
+        content: "You generate search keywords for finding text passages. Given a vague description, output 3-5 distinctive phrases (each on its own line) that would appear literally in the text. Output ONLY the phrases, one per line. Be precise — use words that are likely to appear verbatim.",
+      },
+      {
+        role: "user",
+        content: `Vague description: "${about}"\n\nGenerate 3-5 search phrases that would appear literally in the text:`,
+      },
+    ], 256);
+    return result.trim().split("\n").filter(Boolean).map(s => s.trim().replace(/^[-*]\s*/, ""));
+  } catch {
+    // Fallback: use the description itself as the key
+    return [about];
+  }
+}
+
+// Cluster matching line numbers to find the best passage
+function findBestCluster(matches, lines, minCluster = 3) {
+  if (!matches.length) return null;
+  matches.sort((a, b) => a - b);
+  let best = { start: matches[0], end: matches[0], count: 1 };
+  let cur = { start: matches[0], end: matches[0], count: 1 };
+  for (let i = 1; i < matches.length; i++) {
+    if (matches[i] - cur.end <= 50) {
+      cur.end = matches[i];
+      cur.count++;
+    } else {
+      if (cur.count > best.count) best = { ...cur };
+      cur = { start: matches[i], end: matches[i], count: 1 };
+    }
+  }
+  if (cur.count > best.count) best = { ...cur };
+  // Expand to heading boundaries if cluster is dense enough
+  if (best.count >= minCluster) {
+    const beforeHeading = findPrevHeading(lines, best.start);
+    const afterHeading = findNextHeading(lines, best.end);
+    best.start = beforeHeading !== -1 ? beforeHeading : Math.max(0, best.start - 5);
+    best.end = afterHeading;
+  }
+  return best;
+}
+
+function findPrevHeading(lines, startIdx) {
+  for (let i = startIdx - 1; i >= 0; i--) {
+    if (lines[i].trim() === "") continue;
+    if (HEADING_PATTERN.test(lines[i])) return i;
+    if (/^[A-Z\s]{4,}$/.test(lines[i])) return i;
+  }
+  return -1;
+}
+
+server.tool(
+  "snip",
+  "Extract a contiguous range of text from a source file. Supports: (1) heading-based via 'match' param, (2) semantic via 'about' param (describe vaguely, model finds it), (3) length control ('brief', 'normal', 'full', 'N words', 'N paragraphs'). Language-agnostic — works with any language content. Cross-language: describe in one language, find in another. Pure I/O + pattern matching for heading mode; semantic mode uses model for search-key generation only.",
+  {
+    source: z.string().describe("File path or scout source reference (e.g. 'source:/path/file.txt:chunk-117')"),
+    match: z.string().optional().describe("Heading anchor (e.g. 'Chapter 2', 'CHAPTER I', 'Book One', 'Capítulo 3'). Finds by exact line match, then flexible match, then substring."),
+    end: z.string().optional().describe("Explicit end boundary string. If omitted, snips to next heading or EOF."),
+    about: z.string().optional().describe("Vague semantic description of what to extract. Uses model to generate search keys, then grep to find the passage. Cross-language: describe in English, find in Spanish text."),
+    length: z.string().optional().describe("Output length: 'brief' (~1 para), 'normal' (~3 paras), 'full' (entire section), 'N words', 'N paragraphs' ('3 paragraphs'), 'N lines' ('20 lines'). Default: full section."),
+    context_lines: z.number().optional().describe("Extra lines before the match to include (default 0)"),
+    max_lines: z.number().optional().describe("Maximum lines to return (safety limit, default 1000)"),
+  },
+  async ({ source, match, end, about, length, context_lines, max_lines }) => {
+    try {
+      const filePath = parseSourcePath(source);
+      if (!fs.existsSync(filePath)) {
+        return textResult(`File not found: ${filePath}`);
+      }
+      const raw = fs.readFileSync(filePath, "utf8");
+      const lines = raw.split(/\r?\n/);
+      let startIdx = -1;
+      let endIdx = -1;
+
+      // ── Mode 1: Heading-based (match param) ──
+      if (match) {
+        const esc = match.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const exactPat = new RegExp(`^(?:${esc})\\s*$`, 'm');
+        const flexPat = new RegExp(`^(?:\\s*${esc}\\s*)$`, 'm');
+        let fallback = -1;
+        for (let i = 0; i < lines.length; i++) {
+          if (exactPat.test(lines[i])) { startIdx = i; break; }
+          if (fallback === -1 && flexPat.test(lines[i])) fallback = i;
+        }
+        if (startIdx === -1) startIdx = fallback;
+        if (startIdx === -1) {
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].includes(match)) { startIdx = i; break; }
+          }
+        }
+        if (startIdx === -1) {
+          return textResult(`Match "${match}" not found in ${filePath}`);
+        }
+        startIdx = Math.max(0, startIdx - (context_lines || 0));
+
+        if (end) {
+          for (let i = startIdx + 1; i < lines.length; i++) {
+            if (lines[i].includes(end)) { endIdx = i; break; }
+          }
+          if (endIdx === -1) endIdx = lines.length;
+        } else {
+          endIdx = findNextHeading(lines, startIdx);
+        }
+
+      // ── Mode 2: Semantic about mode ──
+      } else if (about) {
+        const keys = await generateSearchKeys(about);
+        // Grep for each key in the file
+        const allMatches = [];
+        for (const key of keys) {
+          const lower = key.toLowerCase().trim();
+          if (!lower || lower.length < 3) continue;
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].toLowerCase().includes(lower)) {
+              allMatches.push(i);
+            }
+          }
+        }
+        if (allMatches.length === 0) {
+          return textResult(`Could not find passage matching "${about}" in ${filePath}\nGenerated keys: ${keys.join(", ")}`);
+        }
+        const cluster = findBestCluster([...new Set(allMatches)], lines);
+        if (cluster) {
+          startIdx = Math.max(0, cluster.start - (context_lines || 0));
+          endIdx = cluster.end;
+        } else {
+          startIdx = Math.max(0, allMatches[0] - (context_lines || 0));
+          endIdx = lines.length;
+        }
+
+      // ── Mode 3: Raw (no match, no about) ──
+      } else {
+        startIdx = 0;
+        endIdx = lines.length;
+      }
+
+      // Safety: respect max_lines
+      const safeMax = max_lines || 1000;
+      if (endIdx - startIdx > safeMax) {
+        endIdx = startIdx + safeMax;
+      }
+
+      const slice = lines.slice(startIdx, endIdx).join("\n").trim();
+
+      // Apply length trimming
+      const trimmed = trimToLength(slice, length);
+
+      const info = {
+        source: filePath,
+        mode: match ? "heading" : about ? "semantic" : "raw",
+        start_line: startIdx + 1,
+        end_line: Math.min(endIdx, startIdx + slice.split("\n").length),
+        chars: trimmed.length,
+      };
+
+      return textResult(
+        trimmed + `\n\n── snip: ${info.source} lines ${info.start_line}-${info.end_line} (${info.chars} chars, mode: ${info.mode}) ──`
+      );
+    } catch (err) {
+      return textResult(`Error: ${err.message}`);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// fetch_text — download plain text from a URL and save locally
+// ══════════════════════════════════════════════════════════════
+
+server.tool(
+  "fetch_text",
+  "Fetch a URL and save its readable text content to a local file. Strips HTML. Returns the file path and text preview. Use this to import news articles, academic papers, blog posts, or any web content for later snip extraction.",
+  {
+    url: z.string().describe("URL to fetch"),
+    save_path: z.string().optional().describe("Where to save the text. Defaults to /tmp/fetched-{timestamp}.txt"),
+    format: z.string().optional().describe("Output format: 'text' (default, plain text), 'markdown'"),
+    max_chars: z.number().optional().describe("Max characters to save (default 100000)"),
+  },
+  async ({ url, save_path, format, max_chars }) => {
+    try {
+      const ts = Date.now();
+      const outPath = save_path || `/tmp/fetched-${ts}.txt`;
+      const res = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; EOReader/1.0)" },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      const contentType = res.headers.get("content-type") || "";
+      const raw = await res.text();
+      let text;
+      if (format === "markdown") {
+        // Simple HTML→text with minimal structure
+        text = raw
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+          .replace(/<[^>]+>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+      } else {
+        // Simple HTML→text stripping (no external dependency)
+        text = raw
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+          .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "")
+          .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
+          .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
+          .replace(/<[^>]+>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .replace(/\n[ \t]+/g, "\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+      }
+      const maxC = max_chars || 100000;
+      if (text.length > maxC) text = text.slice(0, maxC) + "\n\n[... truncated at " + maxC + " chars]";
+      const dir = path.dirname(outPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(outPath, text, "utf8");
+      const preview = text.slice(0, 500);
+      const lang = detectLanguage(text);
+      return textResult(
+        `Saved ${text.length} chars to ${outPath}\nLanguage: ${lang}\n\nPreview:\n${preview}`
+      );
+    } catch (err) {
+      return textResult(`Error fetching ${url}: ${err.message}`);
+    }
+  }
+);
+
+// detect rough language of a text sample
+function detectLanguage(text) {
+  const sample = text.slice(0, 2000).toLowerCase();
+  const hasBasque = /\b(zure|bat|eta|ez|du|dute|izan|bere|hau|ere|batez|baten|gabe|gure|nahi|orduan|baina|beraz|beste|edo|zein|ziren|zela|zuen|zuten|dela|diren|ditu|dute|izango|egongo)\b/i.test(sample);
+  if (hasBasque) return "Basque";
+  const esCount = (sample.match(/\b(ella|ellos|había|sido|estar|estaba|sobre|entre|sin|desde|hasta|porque|cuando|siempre|también|pero|muy|más|menos|tan|tanto|como|así|allí|aquí|ahora|nunca|jamás|algo|nada|todo|poco|mucho|otro|mismo|gran|buen|hermana|madre|padre|hijo|hija|mujer|hombre|vida|mundo|año|día|vez|parte|forma|historia|obra|arte|artista|país|familia)\b/gi) || []).length;
+  if (esCount > 5) return "Spanish";
+  const enCount = (sample.match(/\b(the|and|was|were|had|have|has|been|with|from|that|this|these|those|which|what|when|where|how|would|could|should|about|between|through|during|before|after|their|them|they|than|because|while|since|until|although|though|whether|or|nor|but|not)\b/gi) || []).length;
+  if (enCount > 10) return "English";
+  return "unknown";
+}
+
+// ══════════════════════════════════════════════════════════════
 // Start server
 // ══════════════════════════════════════════════════════════════
 
@@ -854,4 +1622,5 @@ transportRef = transport;
 await server.connect(transport);
 console.error(`[eoreader-mcp] v3 — merged server (no proxy)`);
 console.error(`[eoreader-mcp] log: ${log.LOG_PATH}`);
+console.error(`[eoreader-mcp] chat history: ${chatHistory.CHAT_DIR}`);
 console.error(`[eoreader-mcp] ready`);

@@ -1,7 +1,7 @@
 {
   "name": "eoreader-mcp",
   "version": "3.0.0",
-  "description": "MCP server — merged eoreader5 engine + Ollama + compression scoring. No proxy.",
+  "description": "MCP server \u2014 merged eoreader5 engine + Ollama + compression scoring. No proxy.",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "zod": "^3.23.0"
+    "glob": "^13.0.6",
+    "zod": "^3.23.0",
+    "@eoreader/host": "file:../../eoreader5/packages/host"
   }
 }

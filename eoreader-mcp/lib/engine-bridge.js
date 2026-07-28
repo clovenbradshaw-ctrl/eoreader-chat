@@ -1,12 +1,34 @@
-import { createState, applyCommand } from "../../../eoreader5/packages/engine/replay/index.js";
-import { search } from "../../../eoreader5/packages/engine/search/index.js";
-import { fold as compressFold } from "../../../eoreader5/packages/engine/emergence/fold/index.js";
-import { blockContentHash } from "../../../eoreader5/packages/engine/observation-index.js";
-import { canonicalHashSync } from "../../../eoreader5/packages/spec/canonical-json/index.js";
-import { CURRENT_OPERATOR_EPOCH } from "../../../eoreader5/packages/spec/operators/epoch.js";
+// Engine access goes through the declared package surface. This file used to
+// import six modules by relative filesystem path and hand-roll its own
+// ObservationBlock@1 construction — a fork that wrote `byte_start: 0` on every
+// chunk, so no quote from this server could be checked against its source
+// file. Admission, chunking, byte offsets, search, spans, and folding now come
+// from @eoreader/host/corpus. The media extraction below is genuine host work
+// and stays here.
+import {
+  CORPUS_API_VERSION,
+  createSession,
+  admitChunked,
+  ingestFile as corpusIngestFile,
+  searchSpans,
+  readSpan,
+  spanUnits,
+  foldSpans,
+} from "@eoreader/host/corpus";
 import fs from "fs";
 import { execSync } from "child_process";
 import * as log from "./log.js";
+
+const EXPECTED_CORPUS_API = 1;
+if (CORPUS_API_VERSION !== EXPECTED_CORPUS_API) {
+  throw new Error(
+    `@eoreader/host/corpus is API v${CORPUS_API_VERSION}; this bridge expects v${EXPECTED_CORPUS_API}`,
+  );
+}
+
+// ── CV Model Configuration ──
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const VISION_MODEL = process.env.VISION_MODEL || "llava:13b";
 
 // ── Binary content detection and extraction ──
 
@@ -39,6 +61,44 @@ function runFfmpegExtract(filePath, outPath, opts = {}) {
     execSync(`ffmpeg -y -v quiet ${args}`, { timeout: 60000 });
     return fs.existsSync(outPath);
   } catch { return false; }
+}
+
+async function extractImageUnderstanding(filePath, model) {
+  const imageBuffer = fs.readFileSync(filePath);
+  const base64Image = imageBuffer.toString("base64");
+  const使用的模型 = model || VISION_MODEL;
+
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: 使用的模型,
+        prompt: "Describe this image in detail. Include: main subjects, scene/environment, colors, any visible text, mood, notable features, and spatial relationships. Be specific and descriptive for searchability.",
+        images: [base64Image],
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(120000), // 2 min timeout for large images
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama API error: ${response.status}`);
+    }
+
+    const result = await response.json();
+    return {
+      caption: result.response,
+      model: 使用的模型,
+      eval_count: result.eval_count,
+    };
+  } catch (err) {
+    // Return structured error so caller can fallback gracefully
+    return {
+      caption: null,
+      model: 使用的模型,
+      error: err.message,
+    };
+  }
 }
 
 function extractAudioSignal(filePath, sessionId) {
@@ -132,7 +192,7 @@ function extractVideoSignal(filePath, sessionId) {
   return lines.join("\n");
 }
 
-function extractImageSignal(filePath) {
+async function extractImageSignal(filePath, opts = {}) {
   const meta = runFfprobe(filePath);
   const lines = [
     `Image file: ${filePath.split("/").pop()}`,
@@ -162,10 +222,21 @@ function extractImageSignal(filePath) {
     if (textContent) lines.push(`Extracted text: ${textContent[1]}`);
   } catch {}
 
+  // NEW: Call CV model for visual understanding
+  if (opts.useCVModel !== false) {
+    const cvResult = await extractImageUnderstanding(filePath, opts.model);
+    if (cvResult.caption) {
+      lines.push(`\nVisual Description:\n${cvResult.caption}`);
+      lines.push(`\n[Extracted via ${cvResult.model}]`);
+    } else if (cvResult.error) {
+      lines.push(`\n[CV model unavailable: ${cvResult.error}]`);
+    }
+  }
+
   return lines.join("\n");
 }
 
-export function ingestBinary(filePath, sessionId) {
+export async function ingestBinary(filePath, sessionId, opts = {}) {
   const ext = extOf(filePath);
   let signal = null;
 
@@ -174,182 +245,137 @@ export function ingestBinary(filePath, sessionId) {
   } else if (VIDEO_EXTS.has(ext)) {
     signal = extractVideoSignal(filePath, sessionId);
   } else if (IMAGE_EXTS.has(ext)) {
-    signal = extractImageSignal(filePath);
+    signal = await extractImageSignal(filePath, {
+      useCVModel: !opts.skipCV,
+      model: opts.model,
+    });
   }
 
   if (!signal) {
     signal = `Binary file: ${filePath.split("/").pop()} (type: ${ext}, unable to extract signal)`;
   }
 
+  // Append user-provided caption if given
+  if (opts.caption) {
+    signal = signal + `\n\nUser caption: ${opts.caption}`;
+  }
+
   const sourceId = `binary:${filePath}`;
   const result = ingestContent(signal, sourceId, sessionId);
-  log.write({ type: "ingest_binary", layer: 1, session: sessionId, path: filePath, ext, chunks: result.chunks, signal_length: signal.length });
-  return { chunks: result.chunks, signal_length: signal.length, ext };
+  log.write({ type: "ingest_binary", layer: 1, session: sessionId, path: filePath, ext, chunks: result.chunks, signal_length: signal.length, has_caption: !!opts.caption, cv_used: !opts.skipCV });
+  return { chunks: result.chunks, signal_length: signal.length, ext, preview: signal.slice(0, 500) };
 }
 
-let state = null;
+let session = null;
 
 export function ensureState() {
-  if (state) return state;
-  const priorSnapshot = {
-    schema_version: "PriorSnapshot@1",
-    prior_id: "prior:sha256:" + "0".repeat(64),
-    operator_epoch: CURRENT_OPERATOR_EPOCH,
-    ledger_head: "head:empty",
-    basis_id: "basis:none",
-    content_hash: "sha256:" + "1".repeat(64),
-  };
-  state = createState({
-    engineVersion: "0.1.0",
-    operatorEpoch: CURRENT_OPERATOR_EPOCH,
-    priorSnapshot,
+  if (!session) session = createSession();
+  return session;
+}
+
+// One record per admitted chunk, now carrying real byte ranges instead of the
+// byte_start: 0 every record used to get.
+function logAdmitted(admitted, sourcePath, sessionId) {
+  admitted.forEach((entry, index) => {
+    log.write({
+      type: "source", layer: 1, session: sessionId,
+      source: entry.sourceId, path: sourcePath,
+      byte_start: entry.byteStart, byte_end: entry.byteEnd,
+      size: entry.byteEnd - entry.byteStart, chunk_index: index,
+    });
   });
-  return state;
 }
 
-export function ingestFile(filePath, sessionId) {
+export async function ingestFile(filePath, sessionId, opts = {}) {
   if (isBinary(filePath)) {
-    return ingestBinary(filePath, sessionId);
+    return ingestBinary(filePath, sessionId, opts);
   }
-
-  const raw = fs.readFileSync(filePath, "utf8");
-  const entries = [];
-  const lines = raw.split("\n");
-  let chunk = [], size = 0, c = 0;
-  const CHUNK_SIZE = 2000;
-  for (const line of lines) {
-    chunk.push(line);
-    size += line.length;
-    if (size > CHUNK_SIZE) {
-      const body = chunk.join("\n").trim();
-      if (body.length > 50) {
-        addChunk(body, filePath, c, sessionId);
-        entries.push({ id: `chunk-${c}`, size: body.length });
-        c++;
-      }
-      chunk = [];
-      size = 0;
-    }
-  }
-  if (chunk.length > 0) {
-    const body = chunk.join("\n").trim();
-    if (body.length > 50) {
-      addChunk(body, filePath, c, sessionId);
-      entries.push({ id: `chunk-${c}`, size: body.length });
-      c++;
-    }
-  }
-  return { chunks: c, entries };
+  const s = ensureState();
+  const { chunks, admitted } = corpusIngestFile(s, filePath);
+  logAdmitted(admitted, filePath, sessionId);
+  return {
+    chunks,
+    entries: admitted.map((a, i) => ({ id: `chunk-${i}`, size: a.byteEnd - a.byteStart })),
+  };
 }
 
-export function ingestDir(dirPath, sessionId, extensions) {
-  let total = 0;
+export async function ingestDir(dirPath, sessionId, extensions) {
+  // Not corpus.ingestDir: this server also ingests audio/video/image, which
+  // needs the CV + ffprobe path above rather than a UTF-8 read. The walk stays
+  // here so binaries route through ingestBinary; text files go to the facade.
   const exts = extensions || ["js","ts","jsx","tsx","mjs","cjs","json","md","py","rs","go","rb","java","kt","swift","c","cpp","h","hpp","mp3","wav","ogg","flac","aac","m4a","mp4","mkv","avi","mov","jpg","jpeg","png","gif","txt","csv","xml","yaml","yml","toml"];
   const extSet = new Set(exts.map(e => e.startsWith(".") ? e : "." + e));
-  function walk(dir) {
+  let total = 0;
+
+  async function walk(dir) {
     let dirents;
     try { dirents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const d of dirents) {
       if (d.name.startsWith(".") || d.name === "node_modules") continue;
       const full = `${dir}/${d.name}`;
-      if (d.isDirectory()) walk(full);
-      else if (d.isFile() && extSet.has("." + d.name.split(".").pop())) {
+      if (d.isDirectory()) {
+        await walk(full);
+      } else if (d.isFile() && extSet.has("." + d.name.split(".").pop())) {
         try {
-          const result = ingestFile(full, sessionId);
+          const result = await ingestFile(full, sessionId);
           total += result.chunks;
         } catch {}
       }
     }
   }
-  walk(dirPath);
+
+  await walk(dirPath);
   return { chunks: total };
 }
 
-function addChunk(text, source, index, sessionId) {
-  const s = ensureState();
-  const sourceId = `source:${source}:chunk-${index}`;
-  const block = {
-    schema: "ObservationBlock@1",
-    block_id: `block:${canonicalHashSync({ source: sourceId, values: [text] })}`,
-    value_type: "string",
-    shape: [1],
-    axis_order: ["paragraph"],
-    values: [text],
-    selectors: [{ byte_start: 0, byte_end: Buffer.byteLength(text, "utf8") }],
-    loss: [{ kind: "none" }],
-  };
-  block.content_hash = blockContentHash(block);
-  const blocks = [block];
-  const blocks_hash = canonicalHashSync(blocks.map(b => ({ block_id: b.block_id, content_hash: b.content_hash })));
-  const envelope = {
-    schema: "ObservationEnvelope@1",
-    source_id: sourceId,
-    source_media_type: "text/plain",
-    decoder: { id: "plain-text", version: "1", loss: [{ kind: "none" }] },
-    axes: [{ axis_id: "paragraph", topology: "ordered", unit: "paragraph" }],
-    fields: [{ field_id: "paragraph:text", value_type: "string", block_id: block.block_id, axes: ["paragraph"] }],
-    anchors: { scheme: "byte", selectors: { "paragraph:text": block.selectors } },
-    source_content_hash: canonicalHashSync({ bytes: Buffer.from(text, "utf8").toString("base64") }),
-    blocks_hash,
-  };
-  state = applyCommand(state, { type: "observation.admit", payload: { envelope, blocks } });
-  log.write({
-    type: "source", layer: 1, session: sessionId,
-    source: sourceId, path: source, text,
-    size: text.length, chunk_index: index,
-  });
-}
-
+// Admit content already in memory — an upload, a paste, or the extracted
+// signal from a binary file.
 export function ingestContent(text, sourceId, sessionId) {
-  ensureState();
-  const lines = text.split("\n");
-  let chunk = [], size = 0, c = 0;
-  const CHUNK_SIZE = 2000;
-  for (const line of lines) {
-    chunk.push(line);
-    size += line.length;
-    if (size > CHUNK_SIZE) {
-      const body = chunk.join("\n").trim();
-      if (body.length > 50) {
-        addChunk(body, sourceId, c, sessionId);
-        c++;
-      }
-      chunk = [];
-      size = 0;
-    }
-  }
-  if (chunk.length > 0) {
-    const body = chunk.join("\n").trim();
-    if (body.length > 50) {
-      addChunk(body, sourceId, c, sessionId);
-      c++;
-    }
-  }
-  return { chunks: c };
+  const s = ensureState();
+  const { chunks, admitted } = admitChunked(s, { text, sourceId });
+  logAdmitted(admitted, sourceId, sessionId);
+  return { chunks };
 }
 
 export function searchQuery(query, limit = 10) {
   const s = ensureState();
-  const result = search(s, { query, limit: Math.min(limit, 40) });
-  const passages = (result.passages || []).map(p => ({
-    text: (p.anchors?.exact_text || []).join(" "),
-    source: p.source_id || "",
-    score: p.score,
-    signalScore: p.signalScore,
-    keywordScore: p.keywordScore,
-  }));
-  return { query, total: result.passages ? result.passages.length : 0, passages, gaps: result.gaps || [] };
+  const { spans, gaps } = searchSpans(s, { query, limit: Math.min(limit, 40) });
+  const units = spanUnits(s, spans);
+  return {
+    query,
+    total: spans.length,
+    passages: spans.map((sp, i) => ({
+      span_id: sp.span_id,
+      // Previously exact_text.join(" ") — a reconstruction inserting separators
+      // absent from the source. This is the verbatim admitted value, and
+      // byte_start/byte_end address it in the source file, so a citation drawn
+      // from it is checkable rather than taken on trust.
+      text: units[i]?.text ?? "",
+      source: sp.source_id || "",
+      byte_start: sp.byte_start,
+      byte_end: sp.byte_end,
+      score: sp.score,
+      preview: sp.preview,
+    })),
+    gaps,
+  };
+}
+
+// Verbatim bytes for a span returned by searchQuery.
+export function spanText(spanId, maxBytes) {
+  return readSpan(ensureState(), { spanId, maxBytes });
 }
 
 export function foldUnits(units, query, budget = 600, maxUnits = 8) {
-  const result = compressFold(
-    { units: units.map(u => ({ text: u.text, coord: null, meta: { source: u.source } })), query },
-    { tokenBudget: budget, maxUnits }
-  );
+  const s = ensureState();
+  const resolved = units?.length && units[0]?.span_id
+    ? spanUnits(s, units)
+    : (units || []).map(u => ({ text: u.text, coord: null, meta: { source: u.source } }));
+  const result = foldSpans(s, { units: resolved, query, tokenBudget: budget, maxUnits });
   return {
     summary: result.summary,
-    selected: result.selected.length,
-    tokens: result.totalTokens,
+    selected: result.selectedCount,
+    tokens: result.tokens,
     budget: result.budget,
     dropped: result.dropped,
   };

@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>EOReader5 Chat</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
@@ -54,6 +56,23 @@
     .modal .log .log-line { padding: 2px 0; }
     .modal .log .log-line.ok { color: #4caf50; }
     .modal .log .log-line.err { color: #f44336; }
+    .msg pre{background:#0d1117;border:1px solid #333;border-radius:6px;padding:8px 10px;overflow-x:auto;margin:4px 0}
+    .msg pre code{background:none;padding:0;color:inherit;font-size:12px}
+    .msg code{background:#21262d;padding:1px 4px;border-radius:3px;font-size:12px;color:#f97583}
+    .msg p{margin:0 0 4px}
+    .msg p:last-child{margin:0}
+    .msg ul,.msg ol{margin:2px 0;padding-left:18px}
+    .msg blockquote{border-left:3px solid #333;padding:2px 8px;margin:4px 0;color:#888}
+    .msg h1,.msg h2,.msg h3,.msg h4{margin:6px 0 4px}
+    .msg h1{font-size:16px}
+    .msg h2{font-size:15px}
+    .msg h3{font-size:14px}
+    .msg table{border-collapse:collapse;margin:4px 0;font-size:12px}
+    .msg th,.msg td{border:1px solid #333;padding:3px 6px}
+    .msg th{background:#16213e}
+    .msg a{color:#58a6ff;text-decoration:none}
+    .msg a:hover{text-decoration:underline}
+    .msg hr{border:none;border-top:1px solid #333;margin:6px 0}
   </style>
 </head>
 <body>
@@ -328,11 +347,21 @@ function assembleContext(userMessage, fetchedMemory) {
 
 // ── Message display ──
 
+function renderInlineMarkdown(text) {
+  if (!text) return "";
+  const html = marked.parse(text, { breaks: true, gfm: true });
+  return DOMPurify.sanitize(html);
+}
+
 function appendMessage(text, role) {
   const messages = document.getElementById("messages");
   const div = document.createElement("div");
   div.className = `msg ${role}`;
-  div.textContent = text;
+  if (role === "user") {
+    div.textContent = text;
+  } else {
+    div.innerHTML = renderInlineMarkdown(text);
+  }
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
 }
@@ -397,6 +426,48 @@ async function extractUrl(url) {
   } catch (e) {
     return { text: `[Error extracting URL: ${e.message}]`, url };
   }
+}
+
+// ── URL detection ──
+
+function detectUrls(text) {
+  const urlRe = /https?:\/\/[^\s<>"')\]]+/g;
+  const matches = text.match(urlRe) || [];
+  // Dedupe
+  return [...new Set(matches)];
+}
+
+// ── Content snapshot: concise summary of a fetched page ──
+// Keeps the context window lean — full text goes to memory, snapshot goes to fold.
+
+const SNAPSHOT_MAX_CHARS = 1400; // ≈400 tokens
+
+function contentSnapshot(text, url) {
+  if (!text || text.length < 20) return `[Empty content from ${url}]`;
+
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(l => l.length > 0);
+  const title = lines[0] || '';
+  const body = lines.slice(1).join(' ');
+
+  // Take up to SNAPSHOT_MAX_CHARS from the body, preferring the start
+  // (most pages front-load key content)
+  let excerpt = body.slice(0, SNAPSHOT_MAX_CHARS);
+  // Try to break at a sentence boundary
+  const lastPeriod = excerpt.lastIndexOf('.');
+  if (lastPeriod > SNAPSHOT_MAX_CHARS * 0.6) {
+    excerpt = excerpt.slice(0, lastPeriod + 1);
+  }
+
+  const wordCount = body.split(/\s+/).length;
+  const charCount = body.length;
+
+  return [
+    `[Source: ${url}]`,
+    title ? `[Title: ${title}]` : '',
+    `[${wordCount} words, ${charCount} chars — excerpt below]`,
+    '',
+    excerpt
+  ].filter(Boolean).join('\n');
 }
 
 // ── LLM backends ──
@@ -493,6 +564,30 @@ async function handleSend() {
   // Fold into eoreader engine
   eoreaderState.admitObservation({ text: userText, type: "user_message" });
 
+  // ── URL fetch → save → snapshot (context-light) ──
+  const urls = detectUrls(userText);
+  let urlSnapshots = "";
+  for (const url of urls) {
+    appendMessage(`Fetching ${url}...`, "fetch");
+    const result = await extractUrl(url);
+    const fullText = result.text || "";
+
+    if (fullText && !fullText.startsWith("[Error")) {
+      // Save full content to memory (retrievable later via FETCH:)
+      const domain = new URL(url).hostname.replace(/^www\./, '');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const filename = `url_${domain}_${ts}.txt`;
+      await saveMemory(filename, fullText);
+
+      // Inject only a compact snapshot into context — not the full text
+      const snapshot = contentSnapshot(fullText, url);
+      urlSnapshots += "\n\n" + snapshot;
+      appendMessage(`Saved ${filename} (${fullText.length} chars) → snapshot in context`, "fetch");
+    } else {
+      appendMessage(`Failed to extract ${url}: ${fullText}`, "fetch");
+    }
+  }
+
   // Search engine for relevant prior observations
   const searchResults = eoreaderState.search(userText, { top_k: 3 });
   let engineContext = "";
@@ -501,10 +596,11 @@ async function handleSend() {
       searchResults.map(r => r.text.slice(0, 200)).join("\n---\n");
   }
 
-  // Assemble context with fetched memory
+  // Assemble context with fetched memory + URL snapshots
   let fetchedMemory = null;
-  if (engineContext) {
-    fetchedMemory = { text: engineContext };
+  const combinedContext = (engineContext || "") + urlSnapshots;
+  if (combinedContext.trim()) {
+    fetchedMemory = { text: combinedContext.trim() };
   }
 
   let context = assembleContext(userText, fetchedMemory);
