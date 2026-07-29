@@ -628,6 +628,19 @@ const TOOL_DEFINITIONS = [
       parameters: { type: "object", properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "terrain_report",
+      description: "Show terrain analysis for an ingested file: which of the 9 terrains (Void/Entity/Kind/Field/Link/Network/Atmosphere/Lens/Paradigm) are detected, Born-gate signal check, and structural evidence. Fully mechanical — no model call.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to the ingested file to analyze" },
+        },
+      },
+    },
+  },
 
   // ── Content Index tools (high-level codebase traversal) ──
 
@@ -889,9 +902,35 @@ const toolHandlers = {
     try {
       const stats = fs.statSync(args.path);
       if (stats.isDirectory()) { await loadCode(args.path); return `Ingested directory ${args.path}`; }
-      const content = await fsp.readFile(args.path, "utf8");
-      store.ingest(content, "file", { path: args.path });
-      return `Ingested ${args.path} (${content.length} chars)`;
+
+      // Read as bytes — works for text, binary, anything
+      const bytes = await fsp.readFile(args.path);
+      const content = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+
+      // Run terrain analysis via engine dispatch
+      let terrainInfo = null;
+      try {
+        const { buildReadingFromBytes } = await import(
+          "/Users/mlacy/Documents/Default Project/eoreader5/packages/engine/perceiver/dispatch.js"
+        );
+        const reading = await buildReadingFromBytes(bytes);
+        terrainInfo = {
+          covered: reading.terrain_report?.covered ?? [],
+          uncovered: reading.terrain_report?.uncovered ?? [],
+          signalDetected: reading.born_gate?.signalDetected ?? false,
+          dominantTerrain: reading.born_gate?.dominantTerrain ?? null,
+          medium: reading.medium,
+          evidence: reading.terrain_report?.evidence ?? {},
+        };
+      } catch (err) {
+        terrainInfo = { error: err.message };
+      }
+
+      store.ingest(content.slice(0, 50000), "file", { path: args.path, terrain: terrainInfo });
+      const terrainSummary = terrainInfo?.signalDetected
+        ? ` Terrain: ${terrainInfo.covered.join(", ")}`
+        : " Terrain: Void (no signal detected)";
+      return `Ingested ${args.path} (${bytes.length} bytes).${terrainSummary}`;
     } catch (err) {
       return `[Error ingesting ${args.path}: ${err.message}]`;
     }
@@ -900,13 +939,65 @@ const toolHandlers = {
   async search_memory(args) {
     const results = store.search(args.query, args.limit || 5);
     if (!results.length) return "(no matches in memory)";
-    return results.map((r, i) =>
-      `--- ${i + 1}. (score: ${r.score.toFixed(2)}) ${r.meta.file || r.meta.path || "?"} ---\n${r.text.slice(0, 500)}`
-    ).join("\n\n");
+    return results.map((r, i) => {
+      const terrain = r.meta?.terrain;
+      const terrainHint = terrain?.signalDetected
+        ? ` [terrain: ${terrain.covered?.join(",")}]`
+        : (terrain ? " [terrain: Void]" : "");
+      return `--- ${i + 1}. (score: ${r.score.toFixed(2)}) ${r.meta.file || r.meta.path || "?"}${terrainHint} ---\n${r.text.slice(0, 500)}`;
+    }).join("\n\n");
   },
 
   async memory_stats() {
     return JSON.stringify({ entries: store.size, max: STORE_MAX, ttl_ms: STORE_TTL });
+  },
+
+  async terrain_report(args) {
+    try {
+      const { buildReadingFromBytes } = await import(
+        "/Users/mlacy/Documents/Default Project/eoreader5/packages/engine/perceiver/dispatch.js"
+      );
+      const bytes = await fsp.readFile(args.path);
+      const reading = await buildReadingFromBytes(bytes);
+      const report = reading.terrain_report;
+      const gate = reading.born_gate;
+
+      if (!report) return `[No terrain report available for ${args.path}]`;
+
+      const lines = [
+        `Terrain Report for: ${args.path}`,
+        `Medium: ${report.medium}`,
+        `Signal detected: ${gate?.signalDetected ? "YES" : "NO"} ${gate?.signalDetected ? "" : "(dominant: Void)"}`,
+        `Covered (${report.covered?.length ?? 0}/9): ${(report.covered ?? []).join(", ") || "none"}`,
+        `Uncovered: ${(report.uncovered ?? []).join(", ") || "none"}`,
+        ``,
+      ];
+
+      const ev = report.evidence ?? {};
+      if (ev.states != null) lines.push(`States: ${ev.states}`);
+      if (ev.events != null) lines.push(`Events: ${ev.events}`);
+      if (ev.categories != null) lines.push(`Categories: ${ev.categories}`);
+      if (ev.associations != null) lines.push(`Associations: ${ev.associations}`);
+      if (ev.voids != null) lines.push(`Voids: ${ev.voids}`);
+      if (ev.paradigms != null) lines.push(`Paradigms: ${ev.paradigms}`);
+      if (ev.atmospheres != null) lines.push(`Atmosphere descriptors: ${ev.atmospheres}`);
+      if (ev.lenses != null) lines.push(`Lens characteristics: ${ev.lenses}`);
+      if (ev.holonicLevels) lines.push(`Holonic: states=${ev.holonicLevels.states}, events=${ev.holonicLevels.events}, phases=${ev.holonicLevels.phases}`);
+      if (ev.dominantTerrain) lines.push(`Dominant terrain: ${ev.dominantTerrain}`);
+      if (ev.dominantStance) lines.push(`Dominant stance: ${ev.dominantStance}`);
+      if (ev.classifier) lines.push(`Classifier: ${ev.classifier}`);
+      if (ev.terrainAmplitudes) {
+        const top = ev.terrainAmplitudes
+          .filter((a) => a.amplitude > 0.01)
+          .sort((a, b) => b.amplitude - a.amplitude)
+          .slice(0, 5);
+        if (top.length) lines.push(`Top terrain amplitudes: ${top.map((t) => `${t.label}=${t.amplitude.toFixed(3)}`).join(", ")}`);
+      }
+
+      return lines.join("\n");
+    } catch (err) {
+      return `[Error analyzing ${args.path}: ${err.message}]`;
+    }
   },
 
   // ── Content Index handlers ──
