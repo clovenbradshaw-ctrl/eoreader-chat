@@ -2426,6 +2426,47 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // Read a chapter by query: "chapter 2", "CHAPTER VII", "II. Le violon"
+    if (url.pathname === "/api/verbatim/chapter") {
+      const q = url.searchParams.get("q");
+      const maxBytes = parseInt(url.searchParams.get("max") || "50000", 10);
+      if (!q) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'q' parameter" }));
+        return;
+      }
+      try {
+        const result = engineReadChapter(q, maxBytes);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // Read context around a span: expand before/after
+    if (url.pathname === "/api/verbatim/context") {
+      const id = url.searchParams.get("id");
+      const before = parseInt(url.searchParams.get("before") || "0", 10);
+      const after = parseInt(url.searchParams.get("after") || "0", 10);
+      if (!id) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'id' parameter" }));
+        return;
+      }
+      try {
+        const result = engineReadContext(id, { beforeBytes: before, afterBytes: after });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
     // Search verbatim spans
     let query = url.searchParams.get("q");
     const limit = parseInt(url.searchParams.get("limit") || "10", 10);
