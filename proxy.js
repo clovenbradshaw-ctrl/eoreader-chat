@@ -33,7 +33,7 @@ import fsp from "fs/promises";
 import path from "path";
 
 import { createModelRouter } from "./model-router.js";
-import { ensureSession, engineIngestFile, engineIngestText, engineGroundQuery, engineSearch, engineReadSpan, engineReadChapter, engineReadContext, engineStats } from "./engine-ground.js";
+import { ensureSession, engineIngestFile, engineIngestText, engineGroundQuery, engineSearch, engineReadSpan, engineReadSegment, engineReadContext, engineStats, engineListSources } from "./engine-ground.js";
 import { HolonicTask } from "./holonic-task.js";
 
 // ── CLI args with validation ──
@@ -553,7 +553,7 @@ const discourse = new DiscourseStore();
 // ── Load code (async, error-isolated per file) ──
 
 async function loadCode(repo) {
-  const ignore = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".opencode"]);
+  const ignore = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".opencode", "colbert-venv", ".claude", ".venv", "venv", ".mypy_cache", ".pytest_cache"]);
   const skip = new Set([".json", ".lock", ".map", ".png", ".jpg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".mp3", ".mp4", ".wasm"]);
 
   async function walk(dir) {
@@ -2113,6 +2113,7 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
         budget: opts.groundBudget ?? 600,
         maxUnits: opts.groundMaxUnits ?? 8,
         limit: opts.groundLimit ?? 15,
+        source: opts.groundSource,
       });
 
       if (groundResult.context) {
@@ -2397,6 +2398,13 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // List ingested sources
+  if (req.method === "GET" && req.url === "/api/sources") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(engineListSources()));
+    return;
+  }
+
   // ══════════════════════════════════════════════════════════════
   // Verbatim endpoints — direct engine search, NO model call.
   // Returns exact byte-offset anchored spans from ingested text.
@@ -2426,17 +2434,18 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    // Read a chapter by query: "chapter 2", "CHAPTER VII", "II. Le violon"
-    if (url.pathname === "/api/verbatim/chapter") {
+    // Read a segment by query — omnimodal, discovers dynamic boundaries
+    if (url.pathname === "/api/verbatim/segment") {
       const q = url.searchParams.get("q");
       const maxBytes = parseInt(url.searchParams.get("max") || "50000", 10);
+      const source = url.searchParams.get("source") || null;
       if (!q) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Missing 'q' parameter" }));
         return;
       }
       try {
-        const result = engineReadChapter(q, maxBytes);
+        const result = engineReadSegment(q, maxBytes, source);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (err) {
@@ -2471,6 +2480,7 @@ const server = http.createServer((req, res) => {
     let query = url.searchParams.get("q");
     const limit = parseInt(url.searchParams.get("limit") || "10", 10);
     const maxChars = parseInt(url.searchParams.get("max_chars") || "800", 10);
+    const source = url.searchParams.get("source") || null;
     if (!query) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Missing 'q' parameter" }));
@@ -2479,7 +2489,7 @@ const server = http.createServer((req, res) => {
     try {
       // Try the query as-is first (the engine's dense retrieval may find
       // semantically related passages even with diacritic differences)
-      let result = engineSearch(query, Math.min(limit, 40), { maxChars });
+      let result = engineSearch(query, Math.min(limit, 40), { maxChars, source });
 
       // If the query returned gaps (no_evidence_matched) and the query has
       // diacritics or the query might differ from stored text's diacritics,
@@ -2490,7 +2500,7 @@ const server = http.createServer((req, res) => {
       if (result.passages.length === 0) {
         const stripped = query.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
         if (stripped !== query) {
-          result = engineSearch(stripped, Math.min(limit, 40), { maxChars });
+          result = engineSearch(stripped, Math.min(limit, 40), { maxChars, source });
           if (result.passages.length > 0) {
             result.diacritic_fallback = true;
             result.diacritic_query = stripped;
@@ -2579,6 +2589,7 @@ const server = http.createServer((req, res) => {
           groundBudget: data.groundBudget ?? 600,
           groundMaxUnits: data.groundMaxUnits ?? 8,
           groundLimit: data.groundLimit ?? 15,
+          groundSource: data.groundSource || null,
         });
       } catch (err) {
         if (!res.headersSent) {

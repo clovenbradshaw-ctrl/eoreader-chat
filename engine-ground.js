@@ -38,21 +38,12 @@ export function ensureSession() {
 
 // ── Ingest ──
 
-export function engineIngestFile(filePath) {
-  const s = ensureSession();
-  const { chunks, admitted } = ingestFile(s, filePath);
-  ingestedChunkCount += chunks;
-  return {
-    path: filePath,
-    chunks,
-    entries: admitted.map((a, i) => ({ id: `chunk-${i}`, size: a.byteEnd - a.byteStart })),
-  };
-}
-
 export function engineIngestText(text, sourceId) {
   const s = ensureSession();
   const { chunks, admitted } = admitChunked(s, { text, sourceId });
   ingestedChunkCount += chunks;
+  const name = sourceId?.replace(/^.*[/\\]/, "") || "(unnamed)";
+  ingestedSources.set(sourceId || name, { name, chunks, ingestedAt: Date.now() });
   return {
     sourceId,
     chunks,
@@ -62,9 +53,14 @@ export function engineIngestText(text, sourceId) {
 
 // ── Search ──
 
-export function engineSearch(query, limit = 10, { maxChars = 800 } = {}) {
+export function engineSearch(query, limit = 10, { maxChars = 800, source: sourceFilter } = {}) {
   const s = ensureSession();
-  const { spans, gaps } = searchSpans(s, { query, limit: Math.min(limit, 40) });
+  let { spans, gaps } = searchSpans(s, { query, limit: Math.min(limit, 40) });
+  // Optionally filter by source_id prefix
+  if (sourceFilter) {
+    const sf = sourceFilter.replace(/^.*[/\\]/, ""); // basename
+    spans = spans.filter(sp => sp.source_id && sp.source_id.includes(sf));
+  }
   const units = spanUnits(s, spans);
   return {
     query,
@@ -123,9 +119,13 @@ function buildCitedContext(kept, foldResult, gaps) {
 //   score.  The text is the EXACT admitted value — not a preview, not a
 //   reconstruction.  Callers that need a shorter snippet truncate explicitly
 //   rather than accepting a silently-lossy default.
-export function engineGroundQuery(query, { budget = 600, maxUnits = 8, limit = 15 } = {}) {
+export function engineGroundQuery(query, { budget = 600, maxUnits = 8, limit = 15, source: sourceFilter } = {}) {
   const s = ensureSession();
-  const { spans, gaps } = searchSpans(s, { query, limit });
+  let { spans, gaps } = searchSpans(s, { query, limit });
+  if (sourceFilter) {
+    const sf = sourceFilter.replace(/^.*[/\\]/, "");
+    spans = spans.filter(sp => sp.source_id && sp.source_id.includes(sf));
+  }
   const units = spanUnits(s, spans);
   const foldResult = foldSpans(s, { units, query, tokenBudget: budget, maxUnits });
 
@@ -168,81 +168,132 @@ export function engineReadSpan(spanId, maxBytes = 4000) {
   return readSpan(ensureSession(), { spanId, maxBytes });
 }
 
-// ── Context snipping: read chapters and arbitrary windows ──
-
-// Pattern for chapter/section markers in Project Gutenberg texts.
-// Covers: CHAPTER I, CHAPTER VII, CHAPITRE PREMIER, CHAPITRE II,
-// Roman-numeral headings like "II. Le violon enchanté", "III. ..."
-const CHAPTER_PATTERN = /^(?:CHAPTER\s+(?:[A-Z]+|\d+)|CHAPITRE\s+(?:PREMIER|I[XV]?|V?I{0,3}|[A-Z]+)|[IVXLCDM]+\..+)$/m;
+// ── Context snipping: read segments and arbitrary windows ──
+//
+// OMNIMODAL CONSTRAINT: no hardcoded patterns.  A "segment" boundary is
+// discovered dynamically from whatever structure the text actually has —
+// Roman numerals, Arabic chapter numbers, all-caps headings, blank-line
+// breaks, or content-signal discontinuities.  A symphony movement with no
+// names and no text is a valid first-class target; the detector works if
+// structural markers exist and degrades gracefully (context window) if they
+// don't.
 
 function resolveSourcePath(sourceId) {
-  // source_id is like "source:/path/to/file.txt:chunk-N" or "source:/path/to/file.txt"
   const match = sourceId?.match(/^source:(.+?)(?::chunk-\d+)?$/);
   return match ? match[1] : null;
 }
 
-// Find chapter boundaries in a source file given a chapter query.
-// Returns { startByte, endByte, chapterLabel } or null.
-function findChapterBoundary(session, chapterQuery) {
-  // Search for the chapter marker
-  const { spans } = searchSpans(session, { query: chapterQuery, limit: 5 });
-  if (!spans.length) return null;
-
-  // Use the best-scoring result to identify the source file
-  const best = spans[0];
-  const sourcePath = resolveSourcePath(best.source_id);
-  if (!sourcePath) return null;
-
-  let text;
-  try { text = fs.readFileSync(sourcePath, "utf8"); } catch { return null; }
-
-  // Find the chapter marker byte offset in the file
-  const searchText = chapterQuery.toLowerCase();
-  const idx = text.toLowerCase().indexOf(searchText, Math.max(0, (best.byte_start || 0) - 500));
-  if (idx < 0) return null;
-
-  // Extract chapter label from the line
-  const lineStart = text.lastIndexOf("\n", idx) + 1;
-  const lineEnd = text.indexOf("\n", idx);
-  const chapterLabel = text.slice(lineStart, lineEnd >= 0 ? lineEnd : idx + 80).trim();
-
-  // Find next chapter boundary
-  const afterStart = idx + searchText.length;
-  const nextChapter = text.slice(afterStart).search(CHAPTER_PATTERN);
-  const endByte = nextChapter >= 0 ? afterStart + nextChapter : text.length;
-
-  return {
-    startByte: lineStart,
-    endByte,
-    chapterLabel,
-    sourcePath,
-    byte_start: best.byte_start,
-    byte_end: best.byte_end,
-  };
+// Score a line as a potential structural delimiter.  Returns 0–5.
+// Clues: short, followed by blank line, contains numbering or formatting
+// that makes it look like a heading rather than a sentence.
+function headingScore(line, nextLineBlank) {
+  const trimmed = line.trim();
+  if (trimmed.length < 3 || trimmed.length > 80) return 0;
+  if (!nextLineBlank) return 0;
+  // Penalize sentence-like lines (end with ?.! or have multiple capitalized words)
+  if (/[?.!]$/.test(trimmed) && !/^[IVXLCDM]+\.$/.test(trimmed)) return 0;
+  // Abbreviation exclusion
+  if (/^(M[\. ]|Dr[\. ]|Mr[\. ]|Mme[\. ]|Mlle[\. ]|St[\. ])/i.test(trimmed)) return 0;
+  let s = 0;
+  if (/^[IVXLCDM]+\.\s/.test(trimmed)) s += 3;
+  if (/^\d+[).]\s/ .test(trimmed)) s += 3;
+  if (/^[A-Z\s'"\u201c\u201d]{4,}$/.test(trimmed) || /^[A-Z][a-z]+\s+[A-Z]/.test(trimmed)) s += 2;
+  if (/[?.!]$/.test(trimmed)) s -= 2;
+  return s >= 2 ? s : 0;
 }
 
-// Read the full text of a chapter found by query.
-// "chapter 2", "CHAPTER VII", "II. Le violon enchanté", etc.
-export function engineReadChapter(chapterQuery, maxBytes = 50000) {
-  const s = ensureSession();
-  const boundary = findChapterBoundary(s, chapterQuery);
-  if (!boundary) return { error: `Chapter not found: "${chapterQuery}"` };
+// Dynamically discover segment boundaries near a byte offset by examining
+// all candidate heading lines within a text window and finding the structural
+// cluster that contains the anchor.
+function discoverSegment(fileText, nearByte) {
+  const hi = fileText.length;
+  const radius = Math.min(6000, hi >> 2);
+  const lo = Math.max(0, nearByte - radius);
+  const hiClip = Math.min(hi, nearByte + radius);
+  // Work on an array of { text, bytePos, isHeading, score }
+  const chunk = fileText.slice(lo, hiClip);
+  const lines = chunk.split("\n");
+  const items = [];
+  let acc = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const bytePos = lo + acc;
+    const nextBlank = i + 1 < lines.length && lines[i + 1].trim() === "";
+    const score = headingScore(lines[i], nextBlank);
+    items.push({ text: lines[i], bytePos, score, isHeading: score > 0 });
+    acc += lines[i].length + 1;
+  }
+  // Find the anchor's line index
+  const anchorRel = nearByte - lo;
+  let anchorIdx = 0;
+  let walk = 0;
+  for (let i = 0; i < items.length; i++) {
+    if (walk >= anchorRel) { anchorIdx = Math.max(0, i - 1); break; }
+    walk += items[i].text.length + 1;
+  }
+  // Scan backward for nearest heading, forward for next heading
+  let startIdx = null, endIdx = null;
+  for (let i = anchorIdx; i >= 0; i--) {
+    if (items[i].isHeading) { startIdx = i; break; }
+  }
+  for (let i = anchorIdx + 1; i < items.length; i++) {
+    if (items[i].isHeading) { endIdx = i; break; }
+  }
+  if (startIdx == null && endIdx == null) return null;
+  if (startIdx == null) startIdx = 0;
+  const startByte = items[startIdx].bytePos;
+  const endByte = endIdx != null ? items[endIdx].bytePos - 1 : hiClip;
+  return { startByte, endByte, label: items[startIdx].text.trim(), headingCount: items.filter(x => x.isHeading).length };
+}
 
-  let text;
-  try { text = fs.readFileSync(boundary.sourcePath, "utf8"); } catch (e) {
-    return { error: `Cannot read ${boundary.sourcePath}: ${e.message}` };
+// Read the segment (chapter, section, movement) containing the content
+// described by query.  Boundary detection is dynamic and text-agnostic —
+// works for CHAPTER I, I. Title, 1. Section, all-caps headings, etc.
+export function engineReadSegment(query, maxBytes = 100000, sourceFilter) {
+  const s = ensureSession();
+  let { spans } = searchSpans(s, { query, limit: 5 });
+  if (!spans.length) return { error: `Segment not found: "${query}"` };
+  // Optionally filter by source_id prefix
+  if (sourceFilter) {
+    const sf = sourceFilter.replace(/^.*[/\\]/, "");
+    const filtered = spans.filter(sp => sp.source_id && sp.source_id.includes(sf));
+    if (!filtered.length) return { error: `Segment not found in "${sourceFilter}"` };
+    spans = filtered;
   }
 
-  const length = Math.min(boundary.endByte - boundary.startByte, maxBytes);
-  const chapterText = text.slice(boundary.startByte, boundary.startByte + length);
+  const best = spans[0];
+  const sourcePath = resolveSourcePath(best.source_id);
+  if (!sourcePath) return { error: `Cannot resolve source from "${best.source_id}"` };
+
+  let fileText;
+  try { fileText = fs.readFileSync(sourcePath, "utf8"); } catch (e) {
+    return { error: `Cannot read ${sourcePath}: ${e.message}` };
+  }
+
+  const anchor = best.byte_start || 0;
+  const seg = discoverSegment(fileText, anchor);
+  if (!seg) {
+    const fallback = fileText.slice(Math.max(0, anchor - 2000), anchor + maxBytes);
+    return {
+      segment: "(no structural boundary detected)",
+      source: sourcePath,
+      byte_start: Math.max(0, anchor - 2000),
+      byte_end: Math.min(fileText.length, anchor + maxBytes),
+      truncated: false,
+      text: fallback,
+    };
+  }
+
+  const length = Math.min(seg.endByte - seg.startByte, maxBytes);
+  const segText = fileText.slice(seg.startByte, seg.startByte + length);
 
   return {
-    chapter: boundary.chapterLabel,
-    source: boundary.sourcePath,
-    byte_start: boundary.startByte,
-    byte_end: boundary.startByte + length,
-    truncated: length < (boundary.endByte - boundary.startByte),
-    text: chapterText,
+    segment: seg.label,
+    source: sourcePath,
+    byte_start: seg.startByte,
+    byte_end: seg.startByte + length,
+    truncated: length < (seg.endByte - seg.startByte),
+    heading_count: seg.headingCount,
+    text: segText,
   };
 }
 
@@ -294,15 +345,40 @@ export function engineReadContext(spanRef, { beforeBytes = 0, afterBytes = 0, ma
   };
 }
 
-// ── Status ──
+// ── Source tracking ──
 
 let ingestedChunkCount = 0;
+const ingestedSources = new Map(); // path → { name, chunks, ingestedAt }
+
+export function engineIngestFile(filePath) {
+  const s = ensureSession();
+  const { chunks, admitted } = ingestFile(s, filePath);
+  ingestedChunkCount += chunks;
+  const name = filePath.replace(/^.*[/\\]/, "");
+  ingestedSources.set(filePath, { name, chunks, ingestedAt: Date.now() });
+  return {
+    path: filePath,
+    chunks,
+    entries: admitted.map((a, i) => ({ id: `chunk-${i}`, size: a.byteEnd - a.byteStart })),
+  };
+}
+
+export function engineListSources() {
+  return Array.from(ingestedSources.entries()).map(([path, info]) => ({
+    path,
+    name: info.name,
+    chunks: info.chunks,
+    ingestedAt: info.ingestedAt,
+  }));
+}
 
 export function engineStats() {
   const s = ensureSession();
   return {
     sessionActive: !!s,
     ingestedChunks: ingestedChunkCount,
+    ingestedFiles: ingestedSources.size,
     spanCap: s.spanCap ?? 2000,
+    sources: Array.from(ingestedSources.values()).map(s => s.name),
   };
 }

@@ -36,9 +36,10 @@ export class HolonicTask {
     model = "gemma2:2b",
     engine = null,
     outputPath = null,
-    perSubTaskBudget = 4000,
+    perSubTaskBudget = 2000,
     maxSubTasks = 8,
     ollamaUrl = OLLAMA_URL,
+    apiTimeout = 600000,
   } = {}) {
     if (!task || typeof task !== "string") throw new TypeError("HolonicTask requires a { task } string");
 
@@ -49,6 +50,7 @@ export class HolonicTask {
     this.perSubTaskBudget = perSubTaskBudget;
     this.maxSubTasks = maxSubTasks;
     this.ollamaUrl = ollamaUrl;
+    this.apiTimeout = apiTimeout;
 
     this.planResult = null;
     this.subTaskResults = [];
@@ -68,7 +70,7 @@ export class HolonicTask {
         stream: false,
         options: { temperature: 0.7, num_predict: Math.max(256, maxTokens) },
       }),
-      signal: AbortSignal.timeout(300000),
+      signal: AbortSignal.timeout(this.apiTimeout),
     });
     if (!resp.ok) throw new Error(`Ollama ${resp.status}: ${await resp.text()}`);
     const data = await resp.json();
@@ -168,18 +170,20 @@ Return ONLY the JSON array. Example:
   async executeSubtask(subTask, context) {
     const { surf = [], priors = [] } = context;
 
-    // Build prompt with priors and source passages — NO citation numbering
+    // Build prompt: writing is reading, reading is rewriting.
+    // The model restates/rewrites the provided passages, it does not generate
+    // from scratch. This is a first draft — auditable, not polished.
     const system = [
-      "You are a research writer. Write ONE focused section of a larger document.",
-      "Draw key terms, specific phrasing, and evidence from the SOURCE TEXT passages below.",
-      "Write naturally — do not use citation markers or reference numbers.",
+      "You rewrite source passages into a coherent section of a larger document.",
+      "Keep the original key terms and specific language from the passages.",
+      "Restate and reorganize — do not add new information.",
+      "Do not use citation markers or reference numbers.",
     ].join(" ");
 
-    let prompt = `Write the "${subTask.label}" section.\n\n`;
+    let prompt = `Rewrite the following passages as a section titled "${subTask.label}".\n\n`;
     prompt += `OVERALL TASK: ${this.task}\n\n`;
-    prompt += `SECTION CONTEXT: ${subTask.description}\n\n`;
+    prompt += `SECTION AIM: ${subTask.description}\n\n`;
 
-    // Inject activated priors (coref/corpus context for the model)
     if (priors.length > 0) {
       prompt += `TEXT PRIORS:\n`;
       for (const p of priors) {
@@ -188,22 +192,22 @@ Return ONLY the JSON array. Example:
       prompt += "\n";
     }
 
-    // Provide source passages for the model to draw from
+    // Each passage is a source to be rewritten
     if (surf.length > 0) {
-      prompt += `SOURCE TEXT (draw your key terms, specific phrasing, and evidence from these passages):\n`;
+      prompt += `PASSAGES TO REWRITE:\n`;
       for (let i = 0; i < surf.length; i++) {
         prompt += `---\n${surf[i].text}\n`;
       }
       prompt += "\n";
     } else {
-      prompt += "(No specific source text available. Rely on general knowledge.)\n\n";
+      prompt += "(No source passages. Write what you know.)\n\n";
     }
 
     if (context.previousSections) {
-      prompt += `PREVIOUS SECTIONS (for continuity):\n${context.previousSections.slice(0, 800)}\n\n`;
+      prompt += `EARLIER SECTIONS (for continuity):\n${context.previousSections.slice(0, 800)}\n\n`;
     }
 
-    prompt += `Write the "${subTask.label}" section now. Use specific language from the SOURCE TEXT. Do not use citation markers or reference numbers. Stay on topic.`;
+    prompt += `Now rewrite the above passages into the "${subTask.label}" section. Keep their language. Restate, do not generate new content. This is a first draft.`;
 
     const maxTokens = Math.min(this.perSubTaskBudget, Math.max(400, this.perSubTaskBudget - estimateTokens(system) - estimateTokens(prompt)));
 
