@@ -50,6 +50,8 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
 .toolbar select:hover{background:#30363d}
 .toolbar button{background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:3px 10px;border-radius:5px;font-size:11px;cursor:pointer}
 .toolbar button:hover{background:#30363d}
+.toolbar .grnd-label{display:flex;align-items:center;gap:4px;cursor:pointer;color:#e94560;font-weight:600;font-size:11px;user-select:none}
+.toolbar .grnd-label input[type=checkbox]{accent-color:#e94560}
 .toolbar .stats{margin-left:auto;font-size:10px;color:#8b949e;font-variant-numeric:tabular-nums}
 
 /* Messages */
@@ -169,6 +171,27 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
 
 /* Fork preview in modal */
 .fork-preview{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;max-height:160px;overflow-y:auto;margin-bottom:10px;font-size:12px;color:#8b949e}
+
+/* ── Sources Panel ── */
+.sources-panel{width:300px;flex:none;background:#0d1117;border-left:1px solid #21262d;display:flex;flex-direction:column;overflow:hidden}
+.sources-panel .sp-header{flex:none;padding:8px 10px;border-bottom:1px solid #21262d;display:flex;align-items:center;justify-content:space-between}
+.sources-panel .sp-title{font-size:11px;font-weight:700;color:#e94560;text-transform:uppercase;letter-spacing:.04em}
+.sources-panel .sp-meta{font-size:10px;color:#484f58;font-variant-numeric:tabular-nums}
+.sources-panel .sp-body{flex:1;overflow-y:auto;padding:6px}
+.sources-panel .sp-body::-webkit-scrollbar{width:4px}
+.sources-panel .sp-body::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px}
+.sources-panel .sp-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;color:#484f58;font-size:12px;text-align:center;padding:20px}
+.sources-panel .sp-empty .sp-empty-icon{font-size:24px;opacity:.4}
+.sources-panel .sp-passage{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:8px 10px;margin-bottom:6px}
+.sources-panel .sp-passage .sp-src{font-size:10px;color:#e94560;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:4px}
+.sources-panel .sp-passage .sp-src .sp-score{font-size:9px;color:#484f58;font-variant-numeric:tabular-nums}
+.sources-panel .sp-passage .sp-text{font-size:12px;line-height:1.5;color:#c9d1d9;white-space:pre-wrap;word-wrap:break-word}
+.sources-panel .sp-passage .sp-label{font-size:9px;color:#3fb950;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+.sources-panel .sp-passage:nth-child(even){background:#0d1117}
+.sources-panel .sp-passage.selected{border-color:#e94560}
+.sources-panel .sp-stats{flex:none;padding:4px 10px;border-top:1px solid #21262d;font-size:10px;color:#484f58;display:flex;justify-content:space-between;font-variant-numeric:tabular-nums}
+
+/* Fork preview in modal */
 .fork-preview .fp-msg{padding:4px 0;border-bottom:1px solid #21262d}
 .fork-preview .fp-msg:last-child{border-bottom:none}
 .fork-preview .fp-msg .fp-role{font-weight:600;font-size:10px;color:#8b949e;margin-bottom:2px}
@@ -251,27 +274,43 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
           <option value="auto" selected>auto</option>
         </select>
       </label>
+      <label class="grnd-label" title="Search ingested source files before answering"><input type="checkbox" id="groundedToggle"> Grounded</label>
       <button onclick="clearChat()">Clear</button>
-      <button id="wsToggleBtn" onclick="toggleWorkspace()">Workspace</button>
+      <button id="wsToggleBtn" onclick="toggleWorkspace()">Documents</button>
       <button onclick="toggleLibrary()">Library</button>
       <button title="Command palette (Ctrl/Cmd+K)" onclick="openPalette()">&#9040; Commands</button>
       <span class="stats" id="stats">msgs: 0</span>
     </div>
 
-    <!-- Workspace panel -->
+    <!-- Document Explorer panel -->
     <div class="workspace" id="workspacePanel">
       <div class="ws-header">
-        <span><span class="ws-title">Workspace</span> <span class="ws-count" id="wsCount">(0 files)</span></span>
+        <span><span class="ws-title">Documents</span> <span class="ws-count" id="wsCount">(0 ingested)</span></span>
         <div class="ws-tools">
-          <label><input type="checkbox" id="wsContextToggle" checked> Context</label>
-          <button id="wsPickBtn" onclick="pickWorkspaceFolder()">Open Folder</button>
-        </div>
-      </div>
-      <div class="ws-list" id="wsList">
-        <div class="ws-empty">No folder selected. Click "Open Folder" to load a workspace.</div>
+          <button id="wsIngestBtn" onclick="pickDocFile()">+ Ingest File</button>
+          <button onclick="refreshDocList()">Refresh</button>
+  </div>
+
+  <!-- Sources Panel (right side, shows grounded passages from engine) -->
+  <div class="sources-panel" id="sourcesPanel">
+    <div class="sp-header">
+      <span class="sp-title">Sources</span>
+      <span class="sp-meta" id="spMeta">0 passages</span>
+    </div>
+    <div class="sp-body" id="spBody">
+      <div class="sp-empty">
+        <div class="sp-empty-icon">📚</div>
+        <div>Ingest documents, then send a grounded query to see source passages here.</div>
       </div>
     </div>
-    <input type="file" id="wsFolderPicker" webkitdirectory multiple style="display:none" onchange="onWorkspacePicked(event)">
+    <div class="sp-stats" id="spStats">No query</div>
+  </div>
+</div>
+      <div class="ws-list" id="wsList">
+        <div class="ws-empty">No documents ingested. Click "+ Ingest File" to add source material to the engine.</div>
+      </div>
+    </div>
+    <input type="file" id="docFilePicker" style="display:none" onchange="onDocFilePicked(event)">
 
     <!-- Library panel -->
     <div class="library" id="libraryPanel">
@@ -346,7 +385,6 @@ let tabCounter = 0;
 let messageCount = 0;
 let sendInProgress = false;
 let forkTarget = null; // { tabId, msgIndex }
-let workspaceFiles = []; // { name, path, size, type, content }
 let selectedModel = "auto";
 let availableModels = null; // { tiny, medium }
 let currentAbort = null;
@@ -384,132 +422,137 @@ function escapeHtml(text) {
   return d.innerHTML;
 }
 
-// ── Workspace / Folder Access ──
+// ── Sources Panel ──
 
-const TEXT_EXTENSIONS = new Set([
-  "txt","md","js","ts","jsx","tsx","py","rb","go","rs","java","kt","swift",
-  "c","cpp","h","hpp","css","html","json","xml","yaml","yml","toml","ini",
-  "cfg","conf","sh","bash","zsh","fish","sql","r","jl","lua","pl","pm",
-  "php","vue","svelte","astro","scss","less","styl","graphql","proto",
-  "tex","bib","rst","asciidoc","adoc","log","env","gitignore","dockerfile",
-  "makefile","cmake","gradle","properties","bat","ps1"
-]);
+function showSources(citations, sourceCount, tokens, gaps) {
+  const body = document.getElementById("spBody");
+  const meta = document.getElementById("spMeta");
+  const stats = document.getElementById("spStats");
 
-function getFileExtension(name) {
-  const i = name.lastIndexOf(".");
-  return i > 0 ? name.slice(i + 1).toLowerCase() : "";
-}
+  meta.textContent = `${sourceCount} passages`;
 
-function isTextFile(name) {
-  const ext = getFileExtension(name);
-  if (TEXT_EXTENSIONS.has(ext)) return true;
-  // Also check common binary extensions to exclude
-  const binaryExts = new Set(["png","jpg","jpeg","gif","bmp","ico","svg","webp",
-    "mp3","wav","ogg","flac","aac","mp4","avi","mov","mkv","webm",
-    "zip","tar","gz","bz2","xz","7z","rar","pdf","doc","docx","xls","xlsx",
-    "ppt","pptx","exe","dll","so","dylib","o","a","lib","wasm",
-    "ttf","otf","woff","woff2","eot","ico"]);
-  return !binaryExts.has(ext);
-}
-
-function pickWorkspaceFolder() {
-  document.getElementById("wsFolderPicker").click();
-}
-
-async function onWorkspacePicked(event) {
-  const files = event.target.files;
-  if (!files || !files.length) return;
-
-  workspaceFiles = [];
-  let loadedText = 0;
-
-  for (const file of files) {
-    const entry = {
-      name: file.webkitRelativePath || file.name,
-      path: file.webkitRelativePath || file.name,
-      size: file.size,
-      type: file.type,
-      content: null
-    };
-
-    if (isTextFile(entry.name) && file.size < 500000) {
-      try {
-        entry.content = await file.text();
-        loadedText++;
-      } catch {}
-    }
-
-    workspaceFiles.push(entry);
+  body.innerHTML = "";
+  for (const c of citations) {
+    const passage = document.createElement("div");
+    passage.className = "sp-passage";
+    passage.id = `sp-${c.index}`;
+    passage.innerHTML =
+      `<div class="sp-label">VERBATIM SOURCE</div>` +
+      `<div class="sp-src"><span>[${c.index}]</span><span class="sp-score">score: ${c.score}</span></div>` +
+      `<div class="sp-text">${escapeHtml(c.text || c.preview)}</div>`;
+    body.appendChild(passage);
   }
 
-  // Sort by path
-  workspaceFiles.sort((a, b) => a.path.localeCompare(b.path));
-  renderWorkspace();
+  if (gaps?.length) {
+    const gapNote = document.createElement("div");
+    gapNote.style.cssText = "font-size:10px;color:#484f58;margin-top:8px;padding:4px 8px;";
+    gapNote.textContent = `Gaps: ${gaps.join("; ")}`;
+    body.appendChild(gapNote);
+  }
+
+  stats.textContent = `${tokens} tokens | ${citations.length} kept`;
 }
 
-function renderWorkspace() {
+function showSourcesEmpty(message) {
+  const body = document.getElementById("spBody");
+  const meta = document.getElementById("spMeta");
+  const stats = document.getElementById("spStats");
+  meta.textContent = "0 passages";
+  body.innerHTML = `<div class="sp-empty"><div class="sp-empty-icon">📚</div><div>${escapeHtml(message)}</div></div>`;
+  stats.textContent = "No query";
+}
+
+// ── Document Explorer (Engine Ingestion) ──
+
+let ingestedDocs = []; // { name, path, chunks, size, timestamp }
+
+function pickDocFile() {
+  document.getElementById("docFilePicker").click();
+}
+
+async function onDocFilePicked(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  ingestDocFile(file);
+}
+
+async function ingestDocFile(file) {
+  const name = file.webkitRelativePath || file.name;
+  appendMessage(`[Ingesting ${name} into engine...]`, "system");
+
+  try {
+    const content = await file.text();
+    const resp = await fetch(`${PROXY_BASE}/api/ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, content }),
+    });
+    if (resp.ok) {
+      const result = await resp.json();
+      ingestedDocs.push({
+        name: name,
+        path: name,
+        chunks: result.chunks,
+        size: content.length,
+        sourceId: result.sourceId,
+        timestamp: Date.now(),
+      });
+      document.getElementById("wsList").querySelector(".ws-empty")?.remove();
+      appendMessage(`[Ingested ${name}: ${result.chunks} chunks, ${(content.length / 1000).toFixed(1)}k chars]`, "system");
+      refreshDocList();
+      saveSessions();
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      appendMessage(`[Error ingesting ${path}: ${err.error || resp.status}]`, "system");
+    }
+  } catch (err) {
+    appendMessage(`[Error ingesting ${path}: ${err.message}]`, "system");
+  }
+}
+
+async function refreshDocList() {
   const list = document.getElementById("wsList");
   const count = document.getElementById("wsCount");
-  count.textContent = `(${workspaceFiles.length} files)`;
 
-  if (workspaceFiles.length === 0) {
-    list.innerHTML = '<div class="ws-empty">No folder selected. Click "Open Folder" to load a workspace.</div>';
+  // Also fetch from server
+  try {
+    const resp = await fetch(`${PROXY_BASE}/api/grounded/stats`);
+    if (resp.ok) {
+      const stats = await resp.json();
+      count.textContent = `(${stats.ingestedChunks} chunks ingested)`;
+    }
+  } catch {}
+
+  if (ingestedDocs.length === 0) {
+    list.innerHTML = '<div class="ws-empty">No documents ingested. Click "+ Ingest File" to add source material to the engine.</div>';
     return;
   }
 
   list.innerHTML = "";
-  for (const f of workspaceFiles) {
+  for (const doc of ingestedDocs) {
     const item = document.createElement("div");
     item.className = "ws-item";
-    const icon = f.content !== null ? "\u{1F4C4}" : "\u{1F4C1}";
-    item.innerHTML = `<span class="ws-icon">${icon}</span><span class="ws-name" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span><span class="ws-size">${formatSize(f.size)}</span>`;
-    if (f.content !== null) {
-      item.addEventListener("click", () => showWorkspaceFile(f));
-    }
+    item.innerHTML = `<span class="ws-icon">📄</span><span class="ws-name" title="${escapeHtml(doc.path)}">${escapeHtml(doc.name)}</span><span class="ws-size">${doc.chunks} chunks</span>`;
     list.appendChild(item);
   }
 }
 
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-}
-
-function showWorkspaceFile(file) {
-  if (file.content === null) {
-    appendMessage(`[File: ${file.path}] Binary file (${formatSize(file.size)}), content not loaded.`, "system");
-    return;
-  }
-  const tab = getActiveTab();
-  if (!tab) return;
-  // Show file content in a system message
-  const preview = file.content.slice(0, 3000);
-  const label = file.content.length > 3000
-    ? `[File: ${file.path}] (${file.content.length} chars, showing first 3000)\n\n`
-    : `[File: ${file.path}] (${file.content.length} chars)\n\n`;
-  appendMessage(label + preview, "system");
-}
-
-function getWorkspaceContext() {
-  const enabled = document.getElementById("wsContextToggle").checked;
-  if (!enabled || workspaceFiles.length === 0) return "";
-
-  const textFiles = workspaceFiles.filter(f => f.content !== null);
-  if (textFiles.length === 0) return "";
-
-  let ctx = "\n\n[Workspace files available for reference]\n";
-  for (const f of textFiles) {
-    ctx += `\n--- ${f.path} (${f.content.length} chars) ---\n`;
-    ctx += f.content.slice(0, 2000);
-    if (f.content.length > 2000) ctx += "\n... (truncated)";
-    ctx += "\n";
-  }
-  return ctx;
-}
-
 function toggleWorkspace() {
   document.getElementById("workspacePanel").classList.toggle("open");
+}
+
+function toggleLibrary() {
+  document.getElementById("libraryPanel").classList.toggle("open");
+}
+
+function switchLibTab(tab) {
+  document.querySelectorAll(".lib-tab").forEach(t => t.classList.remove("active"));
+  document.querySelector(`.lib-tab[data-tab="${tab}"]`)?.classList.add("active");
+}
+
+function loadLibrary() {
+  const body = document.getElementById("libBody");
+  body.innerHTML = '<div class="lib-empty">Library browser coming soon.</div>';
 }
 
 // ── Session (tab) management ──
@@ -628,7 +671,7 @@ function renderTabs() {
 // ── Session persistence (localStorage) ──
 function saveSessions() {
   try {
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify({ tabs, activeTabId, tabCounter }));
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify({ tabs, activeTabId, tabCounter, ingestedDocs }));
   } catch {}
 }
 
@@ -643,6 +686,7 @@ function loadSessions() {
     activeTabId = data.activeTabId && tabs.some(t => t.id === data.activeTabId)
       ? data.activeTabId
       : tabs[0].id;
+    if (Array.isArray(data.ingestedDocs)) ingestedDocs = data.ingestedDocs;
     return true;
   } catch {
     return false;
@@ -958,13 +1002,9 @@ function updateStats() {
 // ── Send ──
 
 function buildPayload(tab) {
-  const msgs = tab.history
+  return tab.history
     .filter(m => m.role === "user" || m.role === "assistant")
     .map(m => ({ role: m.role, content: m.content }));
-  const wsCtx = getWorkspaceContext();
-  if (!wsCtx) return msgs;
-  const wsMsg = { role: "system", content: `[Workspace files available as reference]\n${wsCtx}` };
-  return [...msgs.slice(0, -1), wsMsg, ...msgs.slice(-1)];
 }
 
 function setSending(active) {
@@ -1023,6 +1063,8 @@ async function sendViaEoAI(tab) {
 
   const body = { messages: buildPayload(tab) };
   if (selectedModel !== "auto") body.model = selectedModel;
+  const grounded = document.getElementById("groundedToggle")?.checked ?? false;
+  if (grounded) body.grounded = true;
 
   try {
     const resp = await fetch(`${PROXY_BASE}/api/chat/tools`, {
@@ -1064,6 +1106,13 @@ async function sendViaEoAI(tab) {
 
         if (eventType === "llm_call") {
           setActiveModel(evt.model);
+        } else if (eventType === "grounding") {
+          if (evt.empty) {
+            showSourcesEmpty("No source material found in engine. Ingest files first.");
+          } else if (evt.citations?.length) {
+            showSources(evt.citations, evt.sourceCount, evt.tokens, evt.gaps);
+            appendMessage(`Grounded in ${evt.sourceCount} source passages — see Sources panel ▸`, "system");
+          }
         } else if (eventType === "tool_calls") {
           hideTyping();
           for (const call of evt.calls) {
@@ -1207,7 +1256,7 @@ function paletteCommands() {
   return [
     { label: "New session", key: "Ctrl/Cmd+N", run: newSessionFromUi },
     { label: "Clear current session", run: clearChat },
-    { label: "Toggle workspace panel", run: toggleWorkspace },
+    { label: "Toggle documents panel", run: toggleWorkspace },
     { label: "Toggle library panel", run: toggleLibrary },
     {
       label: "Fork from last message",
@@ -1281,6 +1330,7 @@ async function init() {
   renderTabs();
   renderMessages();
   updateStats();
+  refreshDocList();
 
   try {
     const resp = await fetch(`${PROXY_BASE}/v1/models`);

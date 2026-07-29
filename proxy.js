@@ -33,6 +33,7 @@ import fsp from "fs/promises";
 import path from "path";
 
 import { createModelRouter } from "./model-router.js";
+import { ensureSession, engineIngestFile, engineIngestText, engineGroundQuery, engineStats } from "./engine-ground.js";
 
 // ── CLI args with validation ──
 
@@ -277,6 +278,277 @@ class BoundedStore {
 
 const store = new BoundedStore(STORE_MAX, STORE_TTL);
 
+// ── Discourse store — persisted conversation state ──
+//
+// Every turn (user message + assistant response) is appended to a JSONL file
+// keyed by session id. On startup the file is replayed: each observation is
+// re-admitted into the engine session so the discourse survives restart.
+//
+// When the token budget fills up, older turns are folded into a keyword-based
+// summary. Attachments (ingested files) are tracked as first-class objects
+// rather than injected as inline text — the LLM sees attachment cards
+// (name + size + excerpt) and can FETCH full content on demand.
+//
+// This mirrors eoreader-mcp/lib/chat-history.js but uses async I/O and
+// integrates with the proxy's BoundedStore and engine-ground bridge.
+
+const DISCOURSE_DIR = path.join(MEMORY_DIR, "discourse");
+const DISCOURSE_CONTEXT_WINDOW = 32768;
+const DISCOURSE_FOLD_THRESHOLD = 0.55;
+const DISCOURSE_RECENT_KEEP = 8;
+const ATTACHMENT_SNAPSHOT_CHARS = 1400;
+
+class DiscourseStore {
+  #sessions = new Map();
+
+  #sessionPath(sessionId) {
+    return path.join(DISCOURSE_DIR, `${sessionId}.jsonl`);
+  }
+
+  async #ensureDir() {
+    await fsp.mkdir(DISCOURSE_DIR, { recursive: true });
+  }
+
+  /** Append a single entry (message or attachment) to the JSONL log. */
+  async #append(sessionId, entry) {
+    await this.#ensureDir();
+    const line = JSON.stringify(entry) + "\n";
+    await fsp.appendFile(this.#sessionPath(sessionId), line).catch(() => {});
+  }
+
+  /** Load a session from disk, replaying turns into BoundedStore. */
+  async load(sessionId) {
+    if (this.#sessions.has(sessionId)) return this.#sessions.get(sessionId);
+
+    await this.#ensureDir();
+    const p = this.#sessionPath(sessionId);
+    let lines = [];
+    try {
+      const text = await fsp.readFile(p, "utf8");
+      lines = text.trim().split("\n").filter(Boolean).map(l => JSON.parse(l));
+    } catch { /* no log yet */ }
+
+    const session = {
+      messages: [],
+      attachments: new Map(),
+      priorSummary: null,
+      foldCount: 0,
+      totalTokens: 0,
+    };
+
+    for (const entry of lines) {
+      if (entry.type === "attachment") {
+        session.attachments.set(entry.name, entry);
+      } else if (entry.role) {
+        session.messages.push(entry);
+      }
+    }
+
+    // Re-ingest prior turns into the BoundedStore so search_memory works
+    // across restarts (the engine-ground bridge handles its own replay via
+    // the engine session, which survives in-process)
+    for (const msg of session.messages) {
+      if (msg.content?.length > 5) {
+        store.ingest(msg.content, msg.role, { session: sessionId });
+      }
+    }
+
+    session.totalTokens = this.#sessionTokens(session);
+    this.#sessions.set(sessionId, session);
+    return session;
+  }
+
+  #sessionTokens(session) {
+    let total = 0;
+    for (const msg of session.messages) total += tok(msg.content);
+    total += tok(session.priorSummary || "");
+    return total;
+  }
+
+  /** Add a message turn. Returns { folded, foldCount, messageCount, tokens }. */
+  async addMessage(sessionId, role, content) {
+    const session = await this.load(sessionId);
+    const msg = { role, content, timestamp: Date.now() };
+    session.messages.push(msg);
+    session.totalTokens = this.#sessionTokens(session);
+
+    await this.#append(sessionId, msg);
+
+    let folded = false;
+    if (
+      session.totalTokens > DISCOURSE_CONTEXT_WINDOW * DISCOURSE_FOLD_THRESHOLD &&
+      session.messages.length > DISCOURSE_RECENT_KEEP + 4
+    ) {
+      this.#foldSession(session);
+      folded = true;
+    }
+
+    return {
+      folded,
+      foldCount: session.foldCount,
+      messageCount: session.messages.length,
+      tokens: session.totalTokens,
+    };
+  }
+
+  /** Fold older messages into a mechanical keyword summary. */
+  #foldSession(session) {
+    const splitIdx = session.messages.length - DISCOURSE_RECENT_KEEP;
+    const toSummarize = session.messages.slice(0, splitIdx);
+    const recent = session.messages.slice(splitIdx);
+
+    const priorCtx = session.priorSummary
+      ? `[Prior summary]\n${session.priorSummary}\n\n`
+      : "";
+
+    const dialogue = toSummarize
+      .filter(m => m.role === "user" || m.role === "assistant")
+      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, 300)}`)
+      .join("\n");
+
+    const allText = toSummarize.map(m => m.content).join(" ");
+    const topics = this.#extractTopics(allText);
+
+    session.priorSummary = [
+      priorCtx,
+      `Topics discussed: ${topics.join(", ")}`,
+      `Exchange count: ${toSummarize.length}`,
+      ``,
+      `Key exchanges (compressed):`,
+      dialogue.slice(0, 2000),
+    ].filter(Boolean).join("\n");
+
+    session.messages = recent;
+    session.foldCount++;
+    session.totalTokens = this.#sessionTokens(session);
+  }
+
+  #extractTopics(text) {
+    const stops = new Set([
+      "the","a","an","and","or","but","in","on","at","to","for","of","with",
+      "by","from","as","is","was","are","were","be","been","has","had","have",
+      "do","does","did","will","would","could","should","may","might","can",
+      "that","this","it","its","i","you","we","they","he","she","me","my",
+      "your","our","their","his","her","him","not","no","so","if","then",
+      "just","about","like","what","when","where","how","which","who",
+    ]);
+    const words = text.toLowerCase().split(/\s+/);
+    const freq = {};
+    for (const w of words) {
+      const clean = w.replace(/[^a-z0-9]/g, "");
+      if (clean.length > 3 && !stops.has(clean)) freq[clean] = (freq[clean] || 0) + 1;
+    }
+    return Object.entries(freq)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15)
+      .map(([w]) => w);
+  }
+
+  /** Build model-ready context from a session. */
+  async buildContext(sessionId, systemPrompt, userMessage) {
+    const session = await this.load(sessionId);
+    const messages = [];
+
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+
+    if (session.priorSummary) {
+      messages.push({
+        role: "system",
+        content: `[Conversation context — ${session.foldCount} prior folds]\n${session.priorSummary}`,
+      });
+    }
+
+    // Attachment references (not inline content — the LLM sees cards)
+    if (session.attachments.size > 0) {
+      const attCards = [...session.attachments.values()].map(a => {
+        const excerpt = (a.text || "").slice(0, ATTACHMENT_SNAPSHOT_CHARS);
+        return `[${a.name}] ${a.type || "file"} (${Math.round((a.size || 0) / 1024)}KB) — ${a.ingestedAt || ""}\n${excerpt}`;
+      }).join("\n\n");
+      const attMsg = `Available attachments (use FETCH:<name> to retrieve full content):\n\n${attCards}`;
+      if (tok(attMsg) < DISCOURSE_CONTEXT_WINDOW * 0.4) {
+        messages.push({ role: "system", content: attMsg });
+      } else {
+        // Too many attachments — collapse to a name-only index
+        const idx = `Available attachments: ${[...session.attachments.keys()].join(", ")}`;
+        messages.push({ role: "system", content: idx });
+      }
+    }
+
+    for (const msg of session.messages) {
+      if (msg.role !== "system") messages.push({ role: msg.role, content: msg.content });
+    }
+
+    if (userMessage && !messages.some(m => m.role === "user" && m.content === userMessage)) {
+      messages.push({ role: "user", content: userMessage });
+    }
+
+    return messages;
+  }
+
+  /** Store an ingested file as an attachment (not inline text). */
+  async addAttachment(sessionId, { name, content, type, size, ingestedAt }) {
+    await this.#ensureDir();
+    const session = await this.load(sessionId);
+    const entry = { type: "attachment", name, content: content?.slice(0, 100000), type, size, text: content?.slice(0, ATTACHMENT_SNAPSHOT_CHARS), ingestedAt: ingestedAt || new Date().toISOString(), contentHash: this.#hash(content?.slice(0, 1000) || "") };
+    session.attachments.set(name, entry);
+
+    // Also save full content to a sidecar file so FETCH can retrieve it
+    const sidecar = path.join(DISCOURSE_DIR, `${sessionId}_attach_${name.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
+    await fsp.writeFile(sidecar, content?.slice(0, 500000) || "", "utf8").catch(() => {});
+
+    await this.#append(sessionId, entry);
+    return entry;
+  }
+
+  /** Retrieve full attachment content (for FETCH: tool calls). */
+  async getAttachmentContent(sessionId, name) {
+    await this.load(sessionId);
+    const sidecar = path.join(DISCOURSE_DIR, `${sessionId}_attach_${name.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
+    try {
+      return await fsp.readFile(sidecar, "utf8");
+    } catch {
+      const session = this.#sessions.get(sessionId);
+      return session?.attachments.get(name)?.content || null;
+    }
+  }
+
+  #hash(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) - h) + str.charCodeAt(i) | 0;
+    return (h >>> 0).toString(16).padStart(8, "0");
+  }
+
+  async getStats(sessionId) {
+    const session = await this.load(sessionId);
+    return {
+      messageCount: session.messages.length,
+      attachmentCount: session.attachments.size,
+      foldCount: session.foldCount,
+      tokens: session.totalTokens,
+      contextWindow: DISCOURSE_CONTEXT_WINDOW,
+      usagePercent: Math.round((session.totalTokens / DISCOURSE_CONTEXT_WINDOW) * 100),
+      attachmentNames: [...session.attachments.keys()],
+    };
+  }
+
+  async clearSession(sessionId) {
+    this.#sessions.delete(sessionId);
+    try { await fsp.unlink(this.#sessionPath(sessionId)); } catch {}
+    // Also clean sidecar files
+    const dir = DISCOURSE_DIR;
+    try {
+      const files = await fsp.readdir(dir);
+      for (const f of files) {
+        if (f.startsWith(`${sessionId}_attach_`)) {
+          await fsp.unlink(path.join(dir, f)).catch(() => {});
+        }
+      }
+    } catch {}
+  }
+}
+
+const discourse = new DiscourseStore();
+
 // ── Load code (async, error-isolated per file) ──
 
 async function loadCode(repo) {
@@ -391,7 +663,7 @@ async function fetchAndSaveUrl(url) {
 
 const tok = (t) => Math.ceil((t || "").length / 3.5);
 
-async function assemble(messages) {
+async function assemble(messages, sessionId = "default") {
   const latest = [...messages].reverse().find(m => m.role === "user");
   if (!latest) return messages;
   const query = latest.content || "";
@@ -403,6 +675,32 @@ async function assemble(messages) {
   else {
     const d = "You are EO, a focused research and engineering assistant. Use the available code and context.";
     t += tok(d); ctx.push({ role: "system", content: d });
+  }
+
+  // Discourse context: fold in past conversation from persisted store.
+  // This is how the "discourse channel remembers what we're chatting about."
+  try {
+    const discourseCtx = await discourse.buildContext(sessionId, null, null);
+    // Skip the first message (system prompt) and last message (current query);
+    // fold the in-between conversation history into context
+    const historyMsgs = discourseCtx.filter(m => m.role !== "system" && m.content !== query);
+    if (historyMsgs.length > 0) {
+      let histStr = "";
+      for (const m of historyMsgs.slice(-10)) {
+        const roleTag = m.role === "user" ? "[User]" : "[Assistant]";
+        const folded = m.content.length > 400
+          ? m.content.slice(0, 400) + "..."
+          : m.content;
+        histStr += `${roleTag} ${folded}\n`;
+      }
+      const histCtx = `[Discourse context — recent conversation]\n${histStr}`;
+      if (t + tok(histCtx) < TOKEN_LIMIT) {
+        t += tok(histCtx);
+        ctx.push({ role: "system", content: histCtx });
+      }
+    }
+  } catch (err) {
+    console.error(`[proxy] discourse context load error: ${err.message}`);
   }
 
   // Content index enrichment: if query looks like codebase exploration,
@@ -428,22 +726,48 @@ async function assemble(messages) {
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
       if (r.status === "fulfilled" && r.value.text) {
-        const snapshot = contentSnapshot(r.value.text, urls[i]);
-        if (t + tok(snapshot) < TOKEN_LIMIT) {
-          t += tok(snapshot);
-          ctx.push({ role: "system", content: snapshot });
+        const fullText = r.value.text;
+        // Fold: if content is near the token budget, snapshot it instead of
+        // injecting the full text. The full content is saved to disk and
+        // retrievable via FETCH:.
+        const remaining = TOKEN_LIMIT - t;
+        if (tok(fullText) > remaining * 0.6) {
+          // Content is too big for remaining context — fold it down
+          const snapshot = contentSnapshot(fullText, urls[i]);
+          if (t + tok(snapshot) < TOKEN_LIMIT) {
+            t += tok(snapshot);
+            ctx.push({ role: "system", content: snapshot });
+          }
+        } else {
+          // Content fits — include as-is
+          if (t + tok(fullText) < TOKEN_LIMIT) {
+            t += tok(fullText);
+            ctx.push({ role: "system", content: `[Source: ${urls[i]}]\n${fullText.slice(0, 3000)}` });
+          }
         }
       }
     }
   }
 
+  // Store search — fold results if we're near the limit
+  const budgetForSearch = TOKEN_LIMIT - t;
   const results = store.search(query, 5);
   if (results.length) {
-    const c = "\n[Context: " + qc.terrain + "/" + qc.stance + "]\n" +
+    let c = "\n[Context: " + qc.terrain + "/" + qc.stance + "]\n" +
       results.map(r => r.type === "code"
         ? `--- ${r.meta.file || "?"} ---\n${r.text.slice(0, 500)}`
         : `[${r.type}]: ${r.text.slice(0, 300)}`
       ).join("\n\n");
+
+    // Fold: if search results would hog the budget, truncate each harder
+    if (tok(c) > budgetForSearch * 0.7) {
+      c = "\n[Context: " + qc.terrain + "/" + qc.stance + " — truncated for budget]\n" +
+        results.map(r => r.type === "code"
+          ? `--- ${r.meta.file || "?"} ---\n${r.text.slice(0, 200)}`
+          : `[${r.type}]: ${r.text.slice(0, 120)}`
+        ).join("\n\n");
+    }
+
     if (t + tok(c) < TOKEN_LIMIT) { t += tok(c); ctx.push({ role: "system", content: c }); }
   }
 
@@ -626,6 +950,21 @@ const TOOL_DEFINITIONS = [
       name: "memory_stats",
       description: "Get memory store statistics.",
       parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "fetch_attachment",
+      description: "Fetch the full content of an attached file from the discourse store. Use this when you need to read a file that was uploaded as an attachment.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "The attachment filename to retrieve" },
+          session: { type: "string", description: "Session ID (default: 'default')" },
+        },
+        required: ["name"],
+      },
     },
   },
   {
@@ -950,6 +1289,13 @@ const toolHandlers = {
 
   async memory_stats() {
     return JSON.stringify({ entries: store.size, max: STORE_MAX, ttl_ms: STORE_TTL });
+  },
+
+  async fetch_attachment(args) {
+    const sessionId = args.session || "default";
+    const content = await discourse.getAttachmentContent(sessionId, args.name);
+    if (!content) return `[Attachment "${args.name}" not found in discourse store]`;
+    return content.slice(0, 15000);
   },
 
   async terrain_report(args) {
@@ -1366,7 +1712,7 @@ async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, force
 
 // ── Streaming tool-calling endpoint (SSE) ──
 
-async function handleToolStream(res, messages, tools, forceModel = null) {
+async function handleToolStream(res, messages, tools, forceModel = null, opts = {}) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -1378,15 +1724,75 @@ async function handleToolStream(res, messages, tools, forceModel = null) {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  // Push tool definitions first
   const effectiveTools = tools && tools.length > 0 ? tools : await getAllTools();
   sendSSE("tools_available", { count: effectiveTools.length });
+
+  // Engine-grounded context: search + fold before the LLM sees anything.
+  // Inject as a system message so the model answers from source material
+  // with inline citations, not from training-data recollection.
+  if (opts.grounded) {
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (lastUser) {
+      const query = lastUser.content || "";
+      const groundResult = engineGroundQuery(query, {
+        budget: opts.groundBudget ?? 600,
+        maxUnits: opts.groundMaxUnits ?? 8,
+        limit: opts.groundLimit ?? 15,
+      });
+
+      if (groundResult.context) {
+        const citationList = groundResult.citations
+          .map((c, i) => `[${i + 1}] ${c.source.slice(0, 80)}`)
+          .join("\n");
+        const systemContext =
+          `You are answering a question grounded in SOURCE MATERIAL below. ` +
+          `Cite specific passages using bracketed numbers like [1], [2], etc. ` +
+          `Do NOT invent facts beyond what the sources contain. If the sources ` +
+          `do not contain the answer, say so honestly.\n\n` +
+          `--- Source material (${groundResult.total} passages found, ${groundResult.folded} folded, ${groundResult.tokens} tokens) ---\n` +
+          `${groundResult.context}\n\n` +
+          `[Sources]\n${citationList || "(none)"}`;
+
+        // Inject before the user message
+        const userIdx = messages.findIndex((m) => m.role === "user" && m.content === query);
+        if (userIdx >= 0) {
+          messages.splice(userIdx, 0, { role: "system", content: systemContext });
+        } else {
+          messages.unshift({ role: "system", content: systemContext });
+        }
+
+        sendSSE("grounding", {
+          sourceCount: groundResult.total,
+          foldedCount: groundResult.folded,
+          tokens: groundResult.tokens,
+          citations: groundResult.citations.map((c) => ({
+            index: groundResult.citations.indexOf(c) + 1,
+            source: c.source,
+            score: Math.round(c.score * 100) / 100,
+            preview: c.text.slice(0, 200),
+          })),
+          gaps: groundResult.gaps || [],
+        });
+      } else {
+        sendSSE("grounding", { sourceCount: 0, empty: true, note: "No source material found in engine. Ingest files first." });
+      }
+    }
+  }
 
   try {
     const content = await runToolLoop(messages, effectiveTools, (evt) => {
       sendSSE(evt.type, evt);
     }, 8, forceModel);
     sendSSE("done", { content });
+
+    // Persist assistant response in discourse store
+    if (content?.length > 5 && opts.session) {
+      try {
+        await discourse.addMessage(opts.session, "assistant", content);
+      } catch (err) {
+        console.error(`[proxy] discourse persist error (tools): ${err.message}`);
+      }
+    }
   } catch (err) {
     sendSSE("error", { message: err.message });
   }
@@ -1449,6 +1855,174 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // Discourse endpoints — persisted conversation + attachments
+  // ══════════════════════════════════════════════════════════════
+
+  // Load discourse context for a session
+  if (req.method === "GET" && req.url.startsWith("/api/discourse")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const sessionId = url.searchParams.get("session") || "default";
+    const pathPart = url.pathname;
+
+    (async () => {
+      try {
+        if (pathPart === "/api/discourse/stats") {
+          const stats = await discourse.getStats(sessionId);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(stats));
+          return;
+        }
+
+        if (pathPart === "/api/discourse/context") {
+          const sysPrompt = url.searchParams.get("system") || "You are a helpful assistant with access to a memory store.";
+          const messages = await discourse.buildContext(sessionId, sysPrompt);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ messages, sessionId }));
+          return;
+        }
+
+        // Default: load full session
+        const session = await discourse.load(sessionId);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          sessionId,
+          messages: session.messages,
+          attachments: [...session.attachments.entries()].map(([name, a]) => ({
+            name, type: a.type, size: a.size, ingestedAt: a.ingestedAt,
+          })),
+          foldCount: session.foldCount,
+          tokens: session.totalTokens,
+        }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    })();
+    return;
+  }
+
+  // Add a message to discourse (used by browser chat for persistence)
+  if (req.method === "POST" && req.url === "/api/discourse/message") {
+    let body = "";
+    req.on("data", c => { body += c; });
+    req.on("end", async () => {
+      try {
+        const { sessionId, role, content } = JSON.parse(body);
+        const result = await discourse.addMessage(sessionId || "default", role, content);
+        store.ingest(content, role, { session: sessionId || "default" });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Clear a session
+  if (req.method === "POST" && req.url === "/api/discourse/clear") {
+    let body = "";
+    req.on("data", c => { body += c; });
+    req.on("end", async () => {
+      try {
+        const { sessionId } = JSON.parse(body);
+        await discourse.clearSession(sessionId || "default");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ cleared: true }));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Attachment endpoints
+  if (req.method === "GET" && req.url.startsWith("/api/attachments")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const sessionId = url.searchParams.get("session") || "default";
+
+    (async () => {
+      if (url.pathname === "/api/attachments/content") {
+        const name = url.searchParams.get("name");
+        if (!name) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing 'name' parameter" }));
+          return;
+        }
+        const content = await discourse.getAttachmentContent(sessionId, name);
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end(content || "[Attachment not found]");
+        return;
+      }
+
+      const session = await discourse.load(sessionId);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        attachments: [...session.attachments.entries()].map(([name, a]) => ({
+          name, type: a.type, size: a.size, ingestedAt: a.ingestedAt,
+          excerpt: (a.text || "").slice(0, 200),
+        })),
+      }));
+    })();
+    return;
+  }
+
+  // Ingest a file or text content into the engine session for grounded search
+  if (req.method === "POST" && req.url === "/api/ingest") {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", async () => {
+      try {
+        const { path: ingestPath, content, name, session } = JSON.parse(body);
+        const sessionId = session || "default";
+
+        // Content-based ingestion (from browser file picker)
+        if (content) {
+          const sourceId = `source:${name || "upload"}:${Date.now()}`;
+          const { engineIngestText } = await import("./engine-ground.js");
+          const result = engineIngestText(content.slice(0, 500000), sourceId);
+
+          // Register as attachment in discourse
+          const att = await discourse.addAttachment(sessionId, {
+            name: name || `upload_${Date.now()}.txt`,
+            content,
+            type: name ? (name.endsWith(".txt") ? "text" : name.endsWith(".json") ? "json" : name.endsWith(".js") ? "javascript" : name.endsWith(".py") ? "python" : "file") : "text",
+            size: content.length,
+            ingestedAt: new Date().toISOString(),
+          });
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ...result, name: name || "upload", attachment: { name: att.name, type: att.type, size: att.size } }));
+          return;
+        }
+
+        // Path-based ingestion (from server filesystem)
+        if (!ingestPath) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing 'path' or 'content' field" }));
+          return;
+        }
+        const result = engineIngestFile(ingestPath);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Engine session stats
+  if (req.method === "GET" && req.url === "/api/grounded/stats") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(engineStats()));
+    return;
+  }
+
   // Connect an MCP server
   if (req.method === "POST" && req.url === "/mcp/connect") {
     let body = "";
@@ -1467,7 +2041,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Streaming tool-calling endpoint
+  // Streaming tool-calling endpoint (with optional engine grounding)
   if (req.method === "POST" && req.url === "/api/chat/tools") {
     let body = "";
     let bodySize = 0;
@@ -1479,15 +2053,42 @@ const server = http.createServer((req, res) => {
     req.on("end", async () => {
       try {
         const data = JSON.parse(body);
-        const messages = data.messages || [];
+        let messages = data.messages || [];
         const tools = data.tools;
+        const sessionId = data.session || "default";
 
-        // Ingest user input
+        // Ingest user input into discourse store
         for (const m of messages) {
-          if (m.content?.length > 5 && m.role === "user") store.ingest(m.content, m.role, {});
+          if (m.content?.length > 5 && m.role === "user") {
+            store.ingest(m.content, m.role, { session: sessionId });
+            await discourse.addMessage(sessionId, m.role, m.content);
+          }
         }
 
-        await handleToolStream(res, messages, tools, data.model || null);
+        // Fold discourse context into messages so the LLM remembers
+        // the conversation across turns
+        try {
+          const discourseCtx = await discourse.buildContext(sessionId, null, null);
+          const historyMsgs = discourseCtx.filter(m =>
+            m.role !== "system" && !messages.some(existing =>
+              existing.role === m.role && existing.content === m.content
+            )
+          );
+          if (historyMsgs.length > 0) {
+            // Insert history before the current batch of messages
+            messages = [...discourseCtx.filter(m => m.role === "system"), ...historyMsgs.slice(-10), ...messages];
+          }
+        } catch (err) {
+          console.error(`[proxy] discourse context injection error: ${err.message}`);
+        }
+
+        await handleToolStream(res, messages, tools, data.model || null, {
+          grounded: !!data.grounded,
+          session: sessionId,
+          groundBudget: data.groundBudget ?? 600,
+          groundMaxUnits: data.groundMaxUnits ?? 8,
+          groundLimit: data.groundLimit ?? 15,
+        });
       } catch (err) {
         if (!res.headersSent) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -1523,6 +2124,7 @@ const server = http.createServer((req, res) => {
       // Tools: use provided tools or default to our internal tools
       const tools = data.tools && data.tools.length > 0 ? data.tools : undefined;
       const useToolLoop = tools || data.use_tools;
+      const sessionId = data.session || "default";
 
       try {
         if (useToolLoop) {
@@ -1532,11 +2134,17 @@ const server = http.createServer((req, res) => {
             tools || TOOL_DEFINITIONS
           );
 
-          // Ingest for memory
+          // Persist to discourse store
           for (const m of data.messages || []) {
-            if (m.content?.length > 5) store.ingest(m.content, m.role, {});
+            if (m.content?.length > 5 && m.role === "user") {
+              await discourse.addMessage(sessionId, m.role, m.content);
+              store.ingest(m.content, m.role, { session: sessionId });
+            }
           }
-          if (result.length > 5) store.ingest(result, "assistant", {});
+          if (result?.length > 5) {
+            await discourse.addMessage(sessionId, "assistant", result);
+            store.ingest(result, "assistant", { session: sessionId });
+          }
 
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({
@@ -1554,8 +2162,16 @@ const server = http.createServer((req, res) => {
           // Streaming passthrough with model routing
           const targetUrl = req.url === "/api/chat" ? `${TARGET}/api/chat` : `${TARGET}/v1/chat/completions`;
           // Remove use_tools before forwarding, route model
-          const { use_tools, ...forwardData } = data;
+          const { use_tools, session: _sess, ...forwardData } = data;
           forwardData.model = selectModel(forwardData.messages || []);
+
+          // Persist user messages to discourse before forwarding
+          for (const m of forwardData.messages || []) {
+            if (m.content?.length > 5 && m.role === "user") {
+              await discourse.addMessage(sessionId, m.role, m.content);
+            }
+          }
+
           const upstreamResp = await withRetry(() => safeFetch(targetUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1570,26 +2186,57 @@ const server = http.createServer((req, res) => {
 
           const reader = upstreamResp.body.getReader();
           const decoder = new TextDecoder();
+          let fullResponse = "";
           try {
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
-              res.write(decoder.decode(value, { stream: true }));
+              const chunk = decoder.decode(value, { stream: true });
+              fullResponse += chunk;
+              res.write(chunk);
             }
           } catch (err) {
             console.error(`[proxy] Stream error: ${err.message}`);
           }
           res.end();
+
+          // Persist assistant response after stream completes
+          try {
+            const lines = fullResponse.split("\n");
+            let content = "";
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                try {
+                  const parsed = JSON.parse(line.slice(6));
+                  if (parsed.message?.content) content += parsed.message.content;
+                  else if (parsed.choices?.[0]?.delta?.content) content += parsed.choices[0].delta.content;
+                } catch {}
+              }
+            }
+            if (content.length > 5) {
+              await discourse.addMessage(sessionId, "assistant", content);
+              store.ingest(content, "assistant", { session: sessionId });
+            }
+          } catch (err) {
+            console.error(`[proxy] Discourse persist error (stream): ${err.message}`);
+          }
         } else {
           // Non-streaming passthrough with model routing
-          const { use_tools, ...forwardData } = data;
+          const { use_tools, session: _sess, ...forwardData } = data;
           if (!forwardData.messages) forwardData.messages = [];
+
+          // Persist user messages
+          for (const m of forwardData.messages) {
+            if (m.content?.length > 5 && m.role === "user") {
+              await discourse.addMessage(sessionId, m.role, m.content);
+            }
+          }
 
           // Route model intelligently
           forwardData.model = selectModel(forwardData.messages);
 
-          // Assemble context (ingest, search memory)
-          forwardData.messages = await assemble(forwardData.messages);
+          // Assemble context (ingest, search memory, discourse history)
+          forwardData.messages = await assemble(forwardData.messages, sessionId);
 
           const upstreamResp = await withRetry(() => safeFetch(`${TARGET}/api/chat`, {
             method: "POST",
@@ -1598,10 +2245,14 @@ const server = http.createServer((req, res) => {
           }, 120000), { label: "Ollama chat", maxRetries: 2 });
 
           const upstreamText = await upstreamResp.text();
+          let responseContent = "";
           try {
             const parsed = JSON.parse(upstreamText);
-            const content = parsed.message?.content || parsed.choices?.[0]?.message?.content || "";
-            if (content.length > 5) store.ingest(content, "assistant", {});
+            responseContent = parsed.message?.content || parsed.choices?.[0]?.message?.content || "";
+            if (responseContent.length > 5) {
+              await discourse.addMessage(sessionId, "assistant", responseContent);
+              store.ingest(responseContent, "assistant", { session: sessionId });
+            }
           } catch {}
 
           res.writeHead(upstreamResp.status, { "Content-Type": "application/json" });

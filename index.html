@@ -73,6 +73,18 @@
     .msg a{color:#58a6ff;text-decoration:none}
     .msg a:hover{text-decoration:underline}
     .msg hr{border:none;border-top:1px solid #333;margin:6px 0}
+    .attachment-card{display:flex;align-items:center;gap:8px;background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:8px 12px;max-width:400px;cursor:pointer}
+    .attachment-card:hover{border-color:#e94560}
+    .attachment-card .att-icon{font-size:18px}
+    .attachment-card .att-meta{flex:1;min-width:0}
+    .attachment-card .att-name{font-size:13px;font-weight:600;color:#e0e0e0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .attachment-card .att-size{font-size:11px;color:#888}
+    .attachment-card .att-remove{background:none;border:none;color:#888;cursor:pointer;font-size:14px;padding:0 4px}
+    .attachment-card .att-remove:hover{color:#e94560}
+    .attachment-card.loading{opacity:0.6;border-style:dashed}
+    .attachments-bar{display:flex;flex-wrap:wrap;gap:8px;padding:8px 0}
+    .drop-zone{display:none;border:2px dashed #333;border-radius:12px;padding:16px;text-align:center;color:#666;font-size:13px;margin:8px 20px;transition:border-color 0.2s,color 0.2s}
+    .drop-zone.active{display:block;border-color:#e94560;color:#e94560}
   </style>
 </head>
 <body>
@@ -87,8 +99,16 @@
 
   <div class="input-area">
     <textarea id="userInput" placeholder="Type a message... (Shift+Enter for newline)" rows="1"></textarea>
+    <button id="uploadBtn" title="Upload file" onclick="document.getElementById('fileInput').click()" style="background:#1a1a2e;border:1px solid #555;color:#aaa;padding:10px 14px;border-radius:8px;cursor:pointer;font-size:16px;">+</button>
+    <input type="file" id="fileInput" style="display:none" onchange="handleFileUpload(this.files)" multiple>
     <button id="sendBtn" onclick="handleSend()">Send</button>
   </div>
+
+  <div class="drop-zone" id="dropZone">
+    Drop files here to attach them to the conversation
+  </div>
+
+  <div class="attachments-bar" id="attachmentsBar"></div>
 
   <div class="toolbar">
     <label>Backend:
@@ -156,10 +176,13 @@
 
 <script>
 const MEMORY_SERVER = "http://localhost:8080";
+const PROXY_SERVER = "http://localhost:11435";
 let eoreaderState = null;
 let isProcessing = false;
 let conversationHistory = [];
 let memoryFiles = [];
+let attachments = [];
+let discourseSessionId = localStorage.getItem("eochat_session") || ("sess-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8));
 
 // ── eoreader5 engine state (in-browser, no I/O) ──
 
@@ -312,29 +335,62 @@ function assembleContext(userMessage, fetchedMemory) {
   tokens += estimateTokens(systemPrompt);
   context.push({ role: "system", content: systemPrompt });
 
+  // Attachments as reference cards (not inline text)
+  if (attachments.length > 0) {
+    const attCards = attachments.map(a => {
+      const name = a.name || "upload";
+      const sizeKB = a.size ? Math.round(a.size / 1024) : "?";
+      return `[${name}] ${a.type || "file"} (${sizeKB}KB) — FETCH:<${name}> to read full content`;
+    }).join("\n");
+    const attMsg = "\n\nAttached files:\n" + attCards;
+    tokens += estimateTokens(attMsg);
+    context[0].content += attMsg;
+  }
+
   // Available memory references
   if (memoryFiles.length > 0) {
     const memRefs = "\n\nAvailable memory files: " + memoryFiles.join(", ") +
       "\nUse FETCH:<filename> to retrieve a memory file's content.";
-    tokens += estimateTokens(memRefs);
-    context[0].content += memRefs;
+    const memTokens = estimateTokens(memRefs);
+    if (tokens + memTokens < CONTEXT_TOKEN_LIMIT * 0.5) {
+      tokens += memTokens;
+      context[0].content += memRefs;
+    }
   }
 
-  // Recent conversation (last 6 messages)
+  // Recent conversation (last 6 messages) — fold if token pressure
   const recent = conversationHistory.slice(-6);
+  let recentAdded = 0;
   for (const msg of recent) {
     const msgTokens = estimateTokens(msg.content);
-    if (tokens + msgTokens > CONTEXT_TOKEN_LIMIT) break;
-    tokens += msgTokens;
-    context.push(msg);
+    let content = msg.content;
+    // Fold: if adding this message would exceed budget, truncate it
+    if (tokens + msgTokens > CONTEXT_TOKEN_LIMIT) {
+      if (tokens + estimateTokens(content.slice(0, 200)) < CONTEXT_TOKEN_LIMIT) {
+        content = content.slice(0, 200) + "...";
+      } else {
+        break;
+      }
+    }
+    tokens += estimateTokens(content);
+    context.push({ role: msg.role, content });
+    recentAdded++;
   }
 
-  // Fetched memory content
+  // Fetched memory content — fold if too large
   if (fetchedMemory) {
-    const memContent = "\n\n[Fetched memory content]\n" + fetchedMemory.text;
+    let memContent = "\n\n[Fetched memory content]\n" + fetchedMemory.text;
     const memTokens = estimateTokens(memContent);
-    if (tokens + memTokens <= CONTEXT_TOKEN_LIMIT) {
-      tokens += memTokens;
+    const remaining = CONTEXT_TOKEN_LIMIT - tokens;
+    if (memTokens > remaining * 0.7) {
+      // Fold: truncate fetched memory to fit
+      const maxChars = Math.floor(remaining * 0.7 * 3.5);
+      memContent = "\n\n[Fetched memory — folded to fit context]\n" +
+        fetchedMemory.text.slice(0, maxChars) +
+        (fetchedMemory.text.length > maxChars ? "... [use FETCH: to retrieve full]" : "");
+    }
+    if (tokens + estimateTokens(memContent) <= CONTEXT_TOKEN_LIMIT) {
+      tokens += estimateTokens(memContent);
       context.push({ role: "system", content: memContent });
     }
   }
@@ -470,6 +526,140 @@ function contentSnapshot(text, url) {
   ].filter(Boolean).join('\n');
 }
 
+// ── Discourse persistence ──
+
+async function persistDiscourseMessage(role, content) {
+  try {
+    await fetch(`${PROXY_SERVER}/api/discourse/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: discourseSessionId, role, content }),
+    });
+  } catch (e) {
+    // Proxy might not be running — silently fail, browser chat works standalone
+  }
+}
+
+async function loadDiscourseHistory() {
+  try {
+    const resp = await fetch(`${PROXY_SERVER}/api/discourse?session=${discourseSessionId}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const loadedMsgs = data.messages || [];
+    const loadedAtts = data.attachments || [];
+
+    // Restore attachments
+    for (const att of loadedAtts) {
+      if (!attachments.find(a => a.name === att.name)) {
+        attachments.push(att);
+      }
+    }
+    renderAttachments();
+
+    // Restore messages into conversation history and engine
+    for (const msg of loadedMsgs) {
+      if (msg.role && msg.content) {
+        conversationHistory.push({ role: msg.role, content: msg.content });
+        eoreaderState?.admitObservation({ text: msg.content, type: `${msg.role}_message` });
+      }
+    }
+
+    // Render loaded messages
+    if (loadedMsgs.length > 0) {
+      const messagesDiv = document.getElementById("messages");
+      messagesDiv.innerHTML = '<div class="msg system">Session restored — ' + loadedMsgs.length + ' prior messages</div>';
+      for (const msg of loadedMsgs) {
+        appendMessage(msg.content, msg.role);
+      }
+    }
+  } catch (e) {
+    // Proxy not available — start fresh
+  }
+}
+
+// ── File upload & attachment handling ──
+
+async function uploadFile(file) {
+  const card = createAttachmentCard(file.name, file.size, true);
+  document.getElementById("attachmentsBar").appendChild(card);
+
+  try {
+    const reader = new FileReader();
+    const content = await new Promise((resolve, reject) => {
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsText(file);
+    });
+
+    // Ingest into proxy server (engine + attachment store)
+    const resp = await fetch(`${PROXY_SERVER}/api/ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: file.name,
+        content: content,
+        size: file.size,
+        type: file.type || "text",
+        session: discourseSessionId,
+      }),
+    }).catch(() => ({ ok: false }));
+
+    const attachment = {
+      name: file.name,
+      size: file.size,
+      type: file.type || "text",
+      content: content,
+      ingestedAt: new Date().toISOString(),
+    };
+
+    attachments.push(attachment);
+
+    // Fold into engine
+    eoreaderState.admitObservation({ text: `[Attachment: ${file.name}] ${content.slice(0, 200)}`, type: "attachment" });
+
+    // Remove loading card, replace with real card
+    card.remove();
+    renderAttachments();
+  } catch (err) {
+    card.querySelector(".att-name").textContent = `Error: ${file.name}`;
+    card.classList.remove("loading");
+  }
+}
+
+function createAttachmentCard(name, size, loading) {
+  const card = document.createElement("div");
+  card.className = `attachment-card${loading ? " loading" : ""}`;
+  const sizeKB = size ? Math.round(size / 1024) : "?";
+  card.innerHTML = `
+    <span class="att-icon">📎</span>
+    <div class="att-meta">
+      <div class="att-name">${name}</div>
+      <div class="att-size">${sizeKB}KB${loading ? " — uploading..." : ""}</div>
+    </div>
+    <button class="att-remove" onclick="removeAttachment('${name}', this.parentElement)" title="Remove">✕</button>
+  `;
+  return card;
+}
+
+function renderAttachments() {
+  const bar = document.getElementById("attachmentsBar");
+  bar.innerHTML = "";
+  for (const att of attachments) {
+    bar.appendChild(createAttachmentCard(att.name, att.size, false));
+  }
+}
+
+function removeAttachment(name, el) {
+  attachments = attachments.filter(a => a.name !== name);
+  el.remove();
+}
+
+function handleFileUpload(files) {
+  for (const file of files) {
+    uploadFile(file);
+  }
+}
+
 // ── LLM backends ──
 
 async function callOllama(context, model) {
@@ -560,6 +750,7 @@ async function handleSend() {
 
   appendMessage(userText, "user");
   conversationHistory.push({ role: "user", content: userText });
+  persistDiscourseMessage("user", userText);
 
   // Fold into eoreader engine
   eoreaderState.admitObservation({ text: userText, type: "user_message" });
@@ -631,6 +822,7 @@ async function handleSend() {
   const cleanResponse = stripFetchFromResponse(fullResponse);
   appendMessage(cleanResponse || "[No response]", "assistant");
   conversationHistory.push({ role: "assistant", content: cleanResponse });
+  persistDiscourseMessage("assistant", cleanResponse);
 
   // Fold response into engine
   eoreaderState.admitObservation({ text: cleanResponse, type: "assistant_message" });
@@ -775,12 +967,31 @@ async function checkOllamaStatus() {
 // ── Init ──
 
 async function init() {
+  localStorage.setItem("eochat_session", discourseSessionId);
   eoreaderState = createEngine();
   document.getElementById("engineStatus").textContent = "Engine: ready (in-browser)";
   await fetchMemoryList();
 
+  // Load discourse history from proxy (persisted conversation)
+  await loadDiscourseHistory();
+
   // Check Ollama on load
   await checkOllamaStatus();
+
+  // Drag and drop file upload
+  const dropZone = document.getElementById("dropZone");
+  document.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropZone.classList.add("active");
+  });
+  document.addEventListener("dragleave", (e) => {
+    if (e.target === document.documentElement) dropZone.classList.remove("active");
+  });
+  document.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("active");
+    handleFileUpload(e.dataTransfer.files);
+  });
 
   const input = document.getElementById("userInput");
   input.addEventListener("keydown", (e) => {

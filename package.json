@@ -8,9 +8,17 @@
     "start": "node proxy.js",
     "start:mcp": "node eoreader-mcp/server.js"
   },
-  "keywords": ["eoreader", "semantic-engine", "chat", "tool-calling", "mcp"],
+  "keywords": [
+    "eoreader",
+    "semantic-engine",
+    "chat",
+    "tool-calling",
+    "mcp"
+  ],
   "license": "MIT",
   "dependencies": {
-    "@eoreader/engine": "file:../eoreader5/packages/engine"
+    "@eoreader/engine": "file:../eoreader5/packages/engine",
+    "@eoreader/host": "file:../eoreader5/packages/host",
+    "@eoreader/spec": "file:../eoreader5/packages/spec"
   }
 }
