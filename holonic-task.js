@@ -18,6 +18,24 @@
 
 const OLLAMA_URL = "http://localhost:11434";
 
+// Priors come back from engine.getPriors() as either plain strings or
+// structured objects ({ id, text }, { name, description }, ...). Normalize
+// to a consistent shape so downstream rendering never falls back to
+// implicit string coercion (which prints "[object Object]" for anything
+// that isn't already a string).
+function normalizePrior(p) {
+  if (typeof p === "string") return { id: null, text: p };
+  if (p && typeof p === "object") {
+    return { id: p.id || null, text: p.text || p.description || p.summary || JSON.stringify(p) };
+  }
+  return { id: null, text: String(p) };
+}
+
+function formatPrior(p) {
+  const { id, text } = normalizePrior(p);
+  return id ? `[${id}] ${text}` : text;
+}
+
 function estimateTokens(text) {
   return Math.ceil((text || "").length / 3.5);
 }
@@ -155,11 +173,15 @@ Return ONLY the JSON array. Example:
       byteEnd: r.byte_end ?? null,
     })).filter(r => r.text.length > 20);
 
-    // Get activated priors from engine (or empty if engine doesn't support it)
+    // Get activated priors from engine (or empty if engine doesn't support it).
+    // Normalize immediately — the engine may return plain strings or
+    // structured { id, text } objects; everything downstream reads the
+    // normalized shape, never a raw prior value.
     let priors = [];
     if (this.engine.getPriors && typeof this.engine.getPriors === "function") {
       const surfText = surf.map(s => s.text).join(" ");
-      priors = this.engine.getPriors(surfText);
+      const raw = this.engine.getPriors(surfText) || [];
+      priors = raw.map(normalizePrior);
     }
 
     return { surf, priors };
@@ -187,7 +209,7 @@ Return ONLY the JSON array. Example:
     if (priors.length > 0) {
       prompt += `TEXT PRIORS:\n`;
       for (const p of priors) {
-        prompt += `- ${p}\n`;
+        prompt += `- ${formatPrior(p)}\n`;
       }
       prompt += "\n";
     }
@@ -347,7 +369,7 @@ Return ONLY the JSON array. Example:
         lines.push(`**Activated priors (${st.priors.length}):**`);
         lines.push("");
         for (const p of st.priors) {
-          lines.push(`- ${p}`);
+          lines.push(`- ${formatPrior(p)}`);
         }
         lines.push("");
       }

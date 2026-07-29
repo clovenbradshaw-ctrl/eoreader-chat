@@ -7,10 +7,15 @@
  * Compression scoring via sweep.js (zlib only).
  * No proxy dependency.
  *
- * Tools: fetch_url, read_file, read_text, ingest, scout, fold,
- * search_memory, list_documents, get_memory_state, think, plan,
- * speak, craft, grow, evaluate, revise, cite, compile, steer, patch,
- * set_focus, set_lens, chat_turn, chat_stats, chat_clear.
+ * Tools: fetch_url, fetch_webpage, fetch_text, read_file, read_text, ingest,
+ * ingest_binary, scout, fold, search_memory, list_documents, get_memory_state,
+ * think, plan, speak, craft, grow, evaluate, revise, cite, compile, steer,
+ * patch, run_pipeline, snip, set_focus, set_lens, chat_turn, chat_stats,
+ * chat_clear.
+ *
+ * Generic dev-agent affordances (bash, read/write/edit/glob/grep) were
+ * removed — an EO memory server duplicating a coding agent's own file/shell
+ * tools is scope creep; hosts that need those already provide them.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1082,172 +1087,6 @@ server.tool(
     try {
       chatHistory.clearSession(session);
       return textResult(`Session ${session} cleared.`);
-    } catch (err) {
-      return textResult(`Error: ${err.message}`);
-    }
-  }
-);
-
-// ══════════════════════════════════════════════════════════════
-// bash — run shell commands
-// ══════════════════════════════════════════════════════════════
-
-server.tool(
-  "bash",
-  "Execute a shell command. Returns stdout and stderr. Use for git, npm, ls, find, and other CLI operations.",
-  {
-    command: z.string().describe("The bash command to execute"),
-    workdir: z.string().optional().describe("Working directory (defaults to cwd)"),
-    timeout: z.number().optional().describe("Timeout in milliseconds (default 120000)"),
-  },
-  async ({ command, workdir, timeout }) => {
-    const { execSync } = await import("child_process");
-    try {
-      const result = execSync(command, {
-        cwd: workdir || process.cwd(),
-        timeout: timeout || 120000,
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024 * 10,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      return textResult(result || "(no output)");
-    } catch (err) {
-      const out = err.stdout || "";
-      const errOut = err.stderr || err.message;
-      return textResult(out ? `${out}\n\nSTDERR:\n${errOut}` : `Error: ${errOut}`);
-    }
-  }
-);
-
-// ══════════════════════════════════════════════════════════════
-// read_content — read file contents (raw, no engine ingest)
-// ══════════════════════════════════════════════════════════════
-
-server.tool(
-  "read_content",
-  "Read a file from disk and return its contents. Does NOT ingest into engine — use read_file for that. Supports offset/limit for large files.",
-  {
-    file_path: z.string().describe("Absolute path to the file"),
-    offset: z.number().optional().describe("Line number to start from (1-indexed, default 1)"),
-    limit: z.number().optional().describe("Max lines to return (default 2000)"),
-  },
-  async ({ file_path, offset, limit }) => {
-    try {
-      const content = fs.readFileSync(file_path, "utf8");
-      const lines = content.split("\n");
-      const start = Math.max(0, (offset || 1) - 1);
-      const end = Math.min(lines.length, start + (limit || 2000));
-      const slice = lines.slice(start, end);
-      const numbered = slice.map((line, i) => `${start + i + 1}: ${line}`).join("\n");
-      const total = lines.length;
-      const meta = end < total ? `\n\n(Showing ${start + 1}-${end} of ${total} lines)` : `\n\n(${total} lines total)`;
-      return textResult(numbered + meta);
-    } catch (err) {
-      return textResult(`Error reading ${file_path}: ${err.message}`);
-    }
-  }
-);
-
-// ══════════════════════════════════════════════════════════════
-// glob_files — find files by pattern
-// ══════════════════════════════════════════════════════════════
-
-server.tool(
-  "glob_files",
-  "Find files matching a glob pattern. Returns matching file paths.",
-  {
-    pattern: z.string().describe("Glob pattern (e.g. '**/*.js', 'src/**/*.ts')"),
-    path: z.string().optional().describe("Directory to search in (defaults to cwd)"),
-  },
-  async ({ pattern, path: searchPath }) => {
-    const { globSync } = await import("glob");
-    try {
-      const matches = globSync(pattern, {
-        cwd: searchPath || process.cwd(),
-        absolute: true,
-        nodir: true,
-        ignore: ["**/node_modules/**", "**/.git/**"],
-      });
-      if (!matches.length) return textResult("No files found matching that pattern.");
-      return textResult(matches.join("\n"));
-    } catch (err) {
-      return textResult(`Error: ${err.message}`);
-    }
-  }
-);
-
-// ══════════════════════════════════════════════════════════════
-// grep_files — search file contents by regex
-// ══════════════════════════════════════════════════════════════
-
-server.tool(
-  "grep_files",
-  "Search file contents using a regex pattern. Returns matching lines with file paths and line numbers.",
-  {
-    pattern: z.string().describe("Regex pattern to search for"),
-    path: z.string().optional().describe("Directory to search in (defaults to cwd)"),
-    include: z.string().optional().describe("File pattern to include (e.g. '*.js', '*.{ts,tsx}')"),
-  },
-  async ({ pattern, path: searchPath, include }) => {
-    const { execSync } = await import("child_process");
-    try {
-      const dir = searchPath || ".";
-      const includeFlag = include ? `--include='${include}'` : "";
-      const cmd = `grep -rn ${includeFlag} --exclude-dir=node_modules --exclude-dir=.git '${pattern.replace(/'/g, "'\\''")}' "${dir}" | head -100`;
-      const result = execSync(cmd, { encoding: "utf8", timeout: 30000 });
-      return textResult(result || "No matches found.");
-    } catch (err) {
-      if (err.status === 1) return textResult("No matches found.");
-      return textResult(`Error: ${err.message}`);
-    }
-  }
-);
-
-// ══════════════════════════════════════════════════════════════
-// edit_file — edit a file via string replacement
-// ══════════════════════════════════════════════════════════════
-
-server.tool(
-  "edit_file",
-  "Edit a file by replacing an exact string match with new content. The old_string must match exactly.",
-  {
-    file_path: z.string().describe("Absolute path to the file"),
-    old_string: z.string().describe("Exact string to find and replace"),
-    new_string: z.string().describe("Replacement string"),
-  },
-  async ({ file_path, old_string, new_string }) => {
-    try {
-      const content = fs.readFileSync(file_path, "utf8");
-      if (!content.includes(old_string)) {
-        return textResult(`Error: old_string not found in ${file_path}`);
-      }
-      const updated = content.replace(old_string, new_string);
-      fs.writeFileSync(file_path, updated, "utf8");
-      const occurrences = content.split(old_string).length - 1;
-      return textResult(`Replaced ${occurrences} occurrence(s) in ${file_path}`);
-    } catch (err) {
-      return textResult(`Error: ${err.message}`);
-    }
-  }
-);
-
-// ══════════════════════════════════════════════════════════════
-// write_file — write content to a file
-// ══════════════════════════════════════════════════════════════
-
-server.tool(
-  "write_file",
-  "Write content to a file. Creates parent directories if needed. Overwrites existing content.",
-  {
-    file_path: z.string().describe("Absolute path to the file"),
-    content: z.string().describe("Content to write"),
-  },
-  async ({ file_path, content }) => {
-    try {
-      const dir = path.dirname(file_path);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(file_path, content, "utf8");
-      return textResult(`Written ${content.length} bytes to ${file_path}`);
     } catch (err) {
       return textResult(`Error: ${err.message}`);
     }
