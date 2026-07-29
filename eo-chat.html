@@ -275,6 +275,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
         </select>
       </label>
       <label class="grnd-label" title="Search ingested source files before answering"><input type="checkbox" id="groundedToggle"> Grounded</label>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#8b949e;font-size:11px;user-select:none" title="Enable web search tools (web_search + web_fetch)"><input type="checkbox" id="webSearchToggle" checked> Web</label>
       <button onclick="clearChat()">Clear</button>
       <button id="wsToggleBtn" onclick="toggleWorkspace()">Documents</button>
       <button onclick="toggleLibrary()">Library</button>
@@ -343,6 +344,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6
     <div class="status-bar">
       <span class="sb-item"><span class="sb-dot" id="sbDot"></span><span id="sbConn">connecting...</span></span>
       <span class="sb-item" id="sbModel">model: —</span>
+      <span class="sb-item" id="sbWeb" style="display:none">web: on</span>
       <span class="sb-item" id="sbTools">tools: 0</span>
       <span class="sb-spacer"></span>
       <span class="sb-item"><kbd>Ctrl/Cmd+K</kbd> commands</span>
@@ -436,10 +438,38 @@ function showSources(citations, sourceCount, tokens, gaps) {
     const passage = document.createElement("div");
     passage.className = "sp-passage";
     passage.id = `sp-${c.index}`;
+
+    // Source label: extract readable filename from source_id
+    const srcLabel = (c.source_id || "")
+      .replace(/^source:/, "")
+      .replace(/:chunk-\d+$/, "")
+      .replace(/^.*[/\\]/, "")
+      .slice(0, 50);
+
+    // Byte range display
+    const byteRange = (c.byte_start != null && c.byte_end != null)
+      ? `bytes ${c.byte_start}–${c.byte_end}`
+      : "";
+
+    // Truncate long text for the preview, toggle full on click
+    const textLen = (c.text || "").length;
+    const showFull = textLen <= 600;
+    const previewText = showFull ? (c.text || "") : (c.text || "").slice(0, 600) + " …";
+
     passage.innerHTML =
-      `<div class="sp-label">VERBATIM SOURCE</div>` +
-      `<div class="sp-src"><span>[${c.index}]</span><span class="sp-score">score: ${c.score}</span></div>` +
-      `<div class="sp-text">${escapeHtml(c.text || c.preview)}</div>`;
+      `<div class="sp-label" style="color:#58a6ff">MECHANICAL CITATION</div>` +
+      `<div class="sp-src">` +
+        `<span>[${c.index}]</span>` +
+        `<span class="sp-score">score: ${c.score}</span>` +
+        (byteRange ? ` <span class="sp-score">${escapeHtml(byteRange)}</span>` : "") +
+      `</div>` +
+      (srcLabel ? `<div class="sp-src" style="font-size:10px;color:#8b949e">${escapeHtml(srcLabel)}</div>` : "") +
+      (c.span_id ? `<div class="sp-src" style="font-size:9px;color:#484f58">span: ${escapeHtml(c.span_id.slice(0, 40))}…</div>` : "") +
+      `<div class="sp-text" id="sp-text-${c.index}">${escapeHtml(previewText)}</div>` +
+      (textLen > 600
+        ? `<div style="margin-top:4px"><button class="sp-expand" data-idx="${c.index}" style="background:#21262d;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer" onclick="expandCitation(${c.index})">Show full (${textLen} chars)</button></div>`
+        : "");
+
     body.appendChild(passage);
   }
 
@@ -451,6 +481,18 @@ function showSources(citations, sourceCount, tokens, gaps) {
   }
 
   stats.textContent = `${tokens} tokens | ${citations.length} kept`;
+}
+
+let _allCitations = null;
+
+function expandCitation(index) {
+  if (!_allCitations) return;
+  const c = _allCitations.find(x => x.index === index);
+  if (!c) return;
+  const el = document.getElementById(`sp-text-${index}`);
+  if (el) el.textContent = c.text || "";
+  const btn = el?.parentElement?.querySelector("button");
+  if (btn) btn.style.display = "none";
 }
 
 function showSourcesEmpty(message) {
@@ -776,6 +818,7 @@ const TOOL_ICONS = {
   glob: "\u{1F50D}", grep: "\u{1F50E}", ls: "\u{1F4C1}",
   web_search: "\u{1F310}", web_fetch: "\u{1F517}",
   ingest: "\u{1F9E0}", search_memory: "\u{1F9E0}", memory_stats: "\u{1F4CA}",
+  verbatim_search: "\u{1F50D}\u{1F4DD}", verbatim_read: "\u{1F4DD}",
 };
 
 function toolIcon(name) {
@@ -1029,6 +1072,27 @@ async function send() {
   const text = input.value.trim();
   if (!text || sendInProgress) return;
 
+  // Verbatim command: /v <query> or /verbatim <query>
+  // Routes directly to the engine — no model call.
+  const verbatimMatch = text.match(/^\/v(?:erbatim)?\s+(.+)/i);
+  if (verbatimMatch) {
+    input.value = "";
+    input.style.height = "auto";
+    const tab = getActiveTab();
+    if (!tab) return;
+    appendMessage(text, "user");
+    tab.history.push({ role: "user", content: text });
+    saveSessions();
+    setSending(true);
+    try {
+      await sendVerbatimQuery(verbatimMatch[1], tab);
+    } finally {
+      setSending(false);
+      input.focus();
+    }
+    return;
+  }
+
   input.value = "";
   input.style.height = "auto";
 
@@ -1041,6 +1105,12 @@ async function send() {
 
   turnToolCount = 0;
   sbTools.textContent = "tools: 0";
+  const webEnabled = document.getElementById("webSearchToggle")?.checked ?? true;
+  const webEl = document.getElementById("sbWeb");
+  if (webEl) {
+    webEl.style.display = "";
+    webEl.textContent = webEnabled ? "web: on" : "web: off";
+  }
   setSending(true);
 
   const ep = endpointSelect.value;
@@ -1065,6 +1135,7 @@ async function sendViaEoAI(tab) {
   if (selectedModel !== "auto") body.model = selectedModel;
   const grounded = document.getElementById("groundedToggle")?.checked ?? false;
   if (grounded) body.grounded = true;
+  body.webSearch = document.getElementById("webSearchToggle")?.checked ?? true;
 
   try {
     const resp = await fetch(`${PROXY_BASE}/api/chat/tools`, {
@@ -1108,10 +1179,15 @@ async function sendViaEoAI(tab) {
           setActiveModel(evt.model);
         } else if (eventType === "grounding") {
           if (evt.empty) {
+            _allCitations = null;
             showSourcesEmpty("No source material found in engine. Ingest files first.");
           } else if (evt.citations?.length) {
+            _allCitations = evt.citations;
             showSources(evt.citations, evt.sourceCount, evt.tokens, evt.gaps);
             appendMessage(`Grounded in ${evt.sourceCount} source passages — see Sources panel ▸`, "system");
+          } else {
+            _allCitations = null;
+            showSourcesEmpty("No source material found in engine.");
           }
         } else if (eventType === "tool_calls") {
           hideTyping();
@@ -1215,6 +1291,78 @@ async function sendDirectOllama(tab, endpoint) {
   }
 }
 
+// ── Verbatim: direct engine search, NO model call ──
+
+async function sendVerbatimQuery(query, tab) {
+  showTyping();
+  try {
+    const resp = await fetch(`${PROXY_BASE}/api/verbatim?q=${encodeURIComponent(query)}&limit=10`);
+    if (!resp.ok) {
+      hideTyping();
+      appendMessage(`[Verbatim error: ${resp.status}]`, "system");
+      return;
+    }
+    const data = await resp.json();
+
+    hideTyping();
+
+    if (!data.passages || data.passages.length === 0) {
+      const msg = data.gaps?.length
+        ? `No verbatim spans found for "${query}".\nEngine gaps: ${data.gaps.map(g => g.reason || g).join("; ")}`
+        : `No verbatim spans found for "${query}". Try a different query or ingest the text first.`;
+      appendMessage(msg, "system");
+      return;
+    }
+
+    // Render verbatim results in chat
+    const lines = [];
+    lines.push(`**Verbatim search: "${query}"** — ${data.total} passages found, engine-tier (no model)`);
+    lines.push("");
+    for (const p of data.passages) {
+      const src = (p.source || "?").replace(/^source:/, "").replace(/:chunk-\d+$/, "");
+      lines.push(`**[span:${p.span_id}]** — score: ${p.score.toFixed(2)} — ${src} @ byte ${p.byte_start}-${p.byte_end}`);
+      lines.push(`> ${p.text}`);
+      lines.push("");
+    }
+    if (data.gaps?.length) {
+      lines.push(`*Engine gaps: ${data.gaps.map(g => g.reason || g).join("; ")}*`);
+    }
+
+    const content = lines.join("\n");
+    tab.history.push({ role: "assistant", content });
+    renderMessages();
+    saveSessions();
+
+    // Also show in Sources panel
+    showVerbatimSources(data.passages, data.total);
+  } catch (err) {
+    hideTyping();
+    appendMessage(`[Verbatim error: ${err.message}]`, "system");
+  }
+}
+
+function showVerbatimSources(passages, total) {
+  const body = document.getElementById("spBody");
+  const meta = document.getElementById("spMeta");
+  const stats = document.getElementById("spStats");
+
+  meta.textContent = `${total} verbatim passages`;
+
+  body.innerHTML = "";
+  for (const p of passages) {
+    const div = document.createElement("div");
+    div.className = "sp-passage";
+    div.innerHTML =
+      `<div class="sp-label" style="color:#d29922">VERBATIM — NO MODEL</div>` +
+      `<div class="sp-src"><span>span:${p.span_id}</span><span class="sp-score">score: ${p.score.toFixed(2)}</span></div>` +
+      `<div class="sp-src" style="font-size:9px;color:#484f58">${(p.source || "?").replace(/^source:/, "").replace(/:chunk-\d+$/, "")} @ byte ${p.byte_start}-${p.byte_end}</div>` +
+      `<div class="sp-text">${escapeHtml(p.text)}</div>`;
+    body.appendChild(div);
+  }
+
+  stats.textContent = `${total} total | engine-tier | byte-accurate`;
+}
+
 function clearChat() {
   const tab = getActiveTab();
   if (tab) {
@@ -1273,6 +1421,17 @@ function paletteCommands() {
         nameEl.contentEditable = "true";
         nameEl.focus();
         document.getSelection().selectAllChildren(nameEl);
+      },
+    },
+    {
+      label: "Verbatim search — /v <query>",
+      run: () => {
+        closePalette();
+        input.value = "/v ";
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+        input.style.height = "auto";
+        input.style.height = Math.min(input.scrollHeight, 120) + "px";
       },
     },
     { label: "Next session", key: "Ctrl/Cmd+]", run: () => cycleSession(1) },

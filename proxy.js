@@ -33,7 +33,8 @@ import fsp from "fs/promises";
 import path from "path";
 
 import { createModelRouter } from "./model-router.js";
-import { ensureSession, engineIngestFile, engineIngestText, engineGroundQuery, engineStats } from "./engine-ground.js";
+import { ensureSession, engineIngestFile, engineIngestText, engineGroundQuery, engineSearch, engineReadSpan, engineReadChapter, engineReadContext, engineStats } from "./engine-ground.js";
+import { HolonicTask } from "./holonic-task.js";
 
 // ── CLI args with validation ──
 
@@ -673,7 +674,19 @@ async function assemble(messages, sessionId = "default") {
   const sys = messages.find(m => m.role === "system");
   if (sys) { t += tok(sys.content); ctx.push(sys); }
   else {
-    const d = "You are EO, a focused research and engineering assistant. Use the available code and context.";
+    const d = [
+      "You are EO, a focused research and engineering assistant with access to web search.",
+      "",
+      "## Web Search Strategy",
+      "Use web_search and web_fetch when you need current information, facts, or data not in local context.",
+      "- Formulate keyword-rich queries — be specific",
+      "- Start with type='fast', then use type='deep' for comprehensive research",
+      "- Read results, then web_fetch promising URLs for full content",
+      "- If results are thin, reformulate the query",
+      "- Cite sources when presenting facts",
+      "",
+      "Use the available code and context from memory when relevant.",
+    ].join("\n");
     t += tok(d); ctx.push({ role: "system", content: d });
   }
 
@@ -877,12 +890,16 @@ const TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "web_search",
-      description: "Search the web for information.",
+      description: "Search the web for information. Performs real-time web searches across multiple sources. Use when you need current information, facts, news, or data not available in local context. Always consider using web_fetch after web_search to get detailed content from specific results.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Search query" },
-          count: { type: "number", description: "Number of results (default 5)" },
+          query: { type: "string", description: "The search query. Formulate this like you would for a search engine — specific, keyword-rich queries return better results." },
+          numResults: { type: "number", description: "Number of search results to return (default: 8, max: 20)" },
+          type: { type: "string", enum: ["auto", "fast", "deep"], description: "Search type - 'auto': balanced (default), 'fast': quick snippet results, 'deep': comprehensive search with longer excerpts" },
+          livecrawl: { type: "string", enum: ["fallback", "preferred"], description: "Live crawl mode - 'fallback': use cached results if available (default), 'preferred': prioritize live-fetched content" },
+          contextMaxCharacters: { type: "number", description: "Maximum characters for the formatted result string (default: 8000). Use lower values for tight token budgets, higher when you need full page excerpts." },
+          site: { type: "string", description: "Optional: restrict search to a specific domain (e.g. 'arxiv.org', 'github.com'). Leave empty for all sources." },
         },
         required: ["query"],
       },
@@ -892,11 +909,13 @@ const TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "web_fetch",
-      description: "Fetch a URL and return its content.",
+      description: "Fetch a URL and return its content as readable text. Use this after web_search to get detailed content from specific URLs. Automatically strips HTML tags, scripts, and styles — returns clean text.",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string", description: "URL to fetch" },
+          url: { type: "string", description: "URL to fetch (full URL including https://)" },
+          maxChars: { type: "number", description: "Maximum characters to return (default: 10000, max: 50000)" },
+          format: { type: "string", enum: ["text", "markdown", "html"], description: "Format for the returned content: 'text' for plain text (default), 'markdown' for rendered markdown, 'html' for raw HTML" },
         },
         required: ["url"],
       },
@@ -941,6 +960,36 @@ const TOOL_DEFINITIONS = [
           limit: { type: "number", description: "Max results (default 5)" },
         },
         required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "verbatim_search",
+      description: "Search the engine for EXACT verbatim spans from ingested source texts. Returns byte-offset anchored passages with exact text — no model hallucination. Use this when you need to retrieve EXACT quotes from ingested documents like War and Peace.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query for finding relevant spans" },
+          limit: { type: "number", description: "Max results (default 5, max 40)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "verbatim_read",
+      description: "Read the full verbatim text of a previously-searched span by its span_id. Returns exact byte-offset anchored text from the source document.",
+      parameters: {
+        type: "object",
+        properties: {
+          span_id: { type: "string", description: "The span_id returned by verbatim_search" },
+          max_bytes: { type: "number", description: "Maximum bytes to return (default 4000)" },
+        },
+        required: ["span_id"],
       },
     },
   },
@@ -1085,6 +1134,22 @@ const TOOL_DEFINITIONS = [
       parameters: { type: "object", properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "holonic_task",
+      description: "Decompose and execute a complex writing/research task using holonic task decomposition. Given any task description, the system plans sub-tasks, researches each via the engine, generates content with mechanical inline citations, and assembles the final output with a unified references section. Works best for essays, reports, analyses, or any multi-section document.",
+      parameters: {
+        type: "object",
+        properties: {
+          task: { type: "string", description: "The high-level task or topic to decompose. Be specific: 'write a 5-page essay about X covering Y, with citations'." },
+          model: { type: "string", description: "Ollama model to use (default: gemma2:2b)" },
+          output_path: { type: "string", description: "Optional file path to write the output to" },
+        },
+        required: ["task"],
+      },
+    },
+  },
 ];
 
 // ── Tool handlers ──
@@ -1188,37 +1253,217 @@ const toolHandlers = {
   },
 
   async web_search(args) {
-    const { execSync } = await import("child_process");
-    try {
-      const result = execSync(
-        `curl -s "https://html.duckduckgo.com/html/?q=${encodeURIComponent(args.query)}" 2>/dev/null | sed -n 's/.*<a[^>]*class="result__a"[^>]*>//p' | sed 's/<\\/a>//' | head -${args.count || 5}`,
-        { encoding: "utf8", timeout: 15000, maxBuffer: 5_242_880 }
-      );
-      return result || "(no results)";
-    } catch {
+    // ── Intelligent search with multi-backend support ──
+    // Backends tried in order (configurable via env):
+    //   1. Brave Search API (BRAVE_API_KEY) — best quality, free tier: 2000/mo
+    //   2. Serper.dev (SERPER_API_KEY) — Google results via API, free tier: 2500/mo
+    //   3. DuckDuckGo (no key needed) — fallback HTML scraper
+    //
+    // Returns structured results optimized for LLM consumption.
+    const numResults = Math.min(args.numResults || 8, 20);
+    const searchType = args.type || "auto";
+    const livecrawl = args.livecrawl || "fallback";
+    const maxChars = args.contextMaxCharacters || 8000;
+    const siteFilter = args.site || "";
+
+    // Build the query with optional site filter
+    const query = siteFilter ? `${args.query} site:${siteFilter}` : args.query;
+
+    // ── Backend 1: Brave Search (best quality, free tier) ──
+    const braveKey = process.env.BRAVE_API_KEY;
+    if (braveKey) {
       try {
-        const resp = await safeFetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(args.query)}&format=json`, {}, 10000);
-        const data = await resp.json();
-        return data.AbstractText || data.RelatedTopics?.slice(0, args.count || 5).map(t => t.Text || t).join("\n") || "(no results)";
+        const count = searchType === "deep" ? Math.min(numResults, 20) : Math.min(numResults, 10);
+        const braveUrl = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}&safesearch=off${
+          livecrawl === "preferred" ? "&freshness=week" : ""
+        }${searchType === "deep" ? "&extra_snippets=true" : ""}`;
+        const resp = await safeFetch(braveUrl, {
+          headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey },
+        }, 10000);
+        if (resp.ok) {
+          const data = await resp.json();
+          const web = data.web || {};
+          const results = (web.results || []).slice(0, numResults);
+          if (results.length > 0) {
+            const lines = [`[Brave Search] "${args.query}" — ${web.total_results || results.length} results (type: ${searchType})`, ""];
+            for (let i = 0; i < results.length; i++) {
+              const r = results[i];
+              const snippet = (r.description || r.snippet || "").slice(0, maxChars / numResults);
+              lines.push(`[${i + 1}] ${r.title}`);
+              lines.push(`    URL: ${r.url}`);
+              if (r.page_age) lines.push(`    Age: ${r.page_age}`);
+              if (r.profile) lines.push(`    Source: ${r.profile.name}`);
+              if (snippet) lines.push(`    ${snippet}`);
+              lines.push("");
+            }
+            const output = lines.join("\n");
+            if (output.length > maxChars) return output.slice(0, maxChars) + "\n…[truncated]";
+            return output;
+          }
+        }
       } catch (err) {
-        return `[Search failed: ${err.message}]`;
+        console.error(`[proxy] Brave Search failed, falling back: ${err.message}`);
       }
     }
+
+    // ── Backend 2: Serper.dev (Google results, free tier) ──
+    const serperKey = process.env.SERPER_API_KEY;
+    if (serperKey) {
+      try {
+        const count = searchType === "deep" ? Math.min(numResults, 20) : numResults;
+        const resp = await safeFetch("https://google.serper.dev/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-API-KEY": serperKey },
+          body: JSON.stringify({
+            q: query,
+            num: count,
+            gl: "us",
+            hl: "en",
+          }),
+        }, 10000);
+        if (resp.ok) {
+          const data = await resp.json();
+          const results = (data.organic || []).slice(0, numResults);
+          if (results.length > 0) {
+            const lines = [`[Serper/Google] "${args.query}" — ${data.searchParameters?.totalResults || results.length} results`, ""];
+            for (let i = 0; i < results.length; i++) {
+              const r = results[i];
+              const snippet = (r.snippet || "").slice(0, maxChars / numResults);
+              lines.push(`[${i + 1}] ${r.title}`);
+              lines.push(`    URL: ${r.link}`);
+              if (r.date) lines.push(`    Date: ${r.date}`);
+              if (r.source) lines.push(`    Source: ${r.source}`);
+              if (snippet) lines.push(`    ${snippet}`);
+              lines.push("");
+            }
+            if (data.knowledgeGraph) {
+              const kg = data.knowledgeGraph;
+              lines.push(`[Knowledge Graph] ${kg.title || ""}`);
+              if (kg.description) lines.push(`    ${kg.description}`);
+              if (kg.attributes) {
+                for (const [k, v] of Object.entries(kg.attributes)) lines.push(`    ${k}: ${v}`);
+              }
+              lines.push("");
+            }
+            if (data.peopleAlsoAsk?.length) {
+              lines.push("[People also ask]");
+              for (const q of data.peopleAlsoAsk.slice(0, 3)) lines.push(`  ${q.question}`);
+              lines.push("");
+            }
+            const output = lines.join("\n");
+            if (output.length > maxChars) return output.slice(0, maxChars) + "\n…[truncated]";
+            return output;
+          }
+        }
+      } catch (err) {
+        console.error(`[proxy] Serper failed, falling back: ${err.message}`);
+      }
+    }
+
+    // ── Backend 3: DuckDuckGo (no key needed, HTML scraper) ──
+    try {
+      const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+      const resp = await safeFetch(ddgUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml",
+        },
+      }, 15000);
+
+      if (resp.ok) {
+        const html = await resp.text();
+        const results = [];
+
+        // Parse DuckDuckGo HTML results — extract result blocks
+        const resultBlocks = html.split('<div class="result__body">');
+        // Skip first split (content before any result)
+        for (let i = 1; i < resultBlocks.length && results.length < numResults; i++) {
+          const block = resultBlocks[i];
+          try {
+            // Extract title
+            const titleMatch = block.match(/<a[^>]*class="result__a"[^>]*>(.*?)<\/a>/s);
+            const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+
+            // Extract URL
+            const urlMatch = block.match(/<a[^>]*class="result__a"[^>]*href="(.*?)"/);
+            let url = urlMatch ? urlMatch[1] : "";
+            if (url.startsWith("//")) url = "https:" + url;
+            
+            // Extract snippet
+            const snippetMatch = block.match(/<a[^>]*class="result__snippet"[^>]*>(.*?)<\/a>/s);
+            let snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+            if (!snippet) {
+              const altMatch = block.match(/class="result__snippet"[^>]*>(.*?)<\/span>/s);
+              snippet = altMatch ? altMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+            }
+
+            if (title && url) {
+              results.push({ title, url, snippet });
+            }
+          } catch {}
+        }
+
+        if (results.length > 0) {
+          const lines = [`[DuckDuckGo] "${args.query}" — ${results.length} results`, ""];
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i];
+            const snippet = r.snippet.slice(0, Math.floor(maxChars / results.length));
+            lines.push(`[${i + 1}] ${r.title}`);
+            lines.push(`    URL: ${r.url}`);
+            if (snippet) lines.push(`    ${snippet}`);
+            lines.push("");
+          }
+          const output = lines.join("\n");
+          if (output.length > maxChars) return output.slice(0, maxChars) + "\n…[truncated]";
+          return output;
+        }
+      }
+    } catch (err) {
+      console.error(`[proxy] DuckDuckGo search failed: ${err.message}`);
+    }
+
+    // ── All backends failed ──
+    return `[Search failed: all backends exhausted for "${args.query}". Try a different query or check network connectivity.]`;
   },
 
   async web_fetch(args) {
+    const maxChars = Math.min(args.maxChars || 10000, 50000);
+    const format = args.format || "text";
     try {
-      const resp = await safeFetch(args.url, { headers: { "User-Agent": "EOReader/2.0" } }, 15000);
+      const resp = await safeFetch(args.url, {
+        headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+      }, 15000);
       const text = await resp.text();
-      const isHtml = (resp.headers.get("content-type") || "").includes("text/html") || text.trim().startsWith("<");
-      if (isHtml) {
-        return text
-          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/\s+/g, " ").trim().slice(0, 10000);
+      const contentType = resp.headers.get("content-type") || "";
+      const isHtml = contentType.includes("text/html") || contentType.includes("application/xhtml") || text.trim().startsWith("<");
+
+      if (!isHtml && format === "text") {
+        return text.slice(0, maxChars);
       }
-      return text.slice(0, 10000);
+
+      // Strip HTML tags for text format
+      const clean = text
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+        .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
+        .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
+        .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "")
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+        .replace(/&[a-z]+;/g, " ")
+        .replace(/\s+/g, " ").trim();
+
+      if (!clean || clean.length < 20) {
+        return `[${args.url}] fetched but content appears empty or is behind a paywall/login.`;
+      }
+
+      const result = clean.slice(0, maxChars);
+      return result.length < clean.length
+        ? result + "\n\n…[content truncated — use web_fetch with maxChars higher to see more]"
+        : result;
     } catch (err) {
       return `[Error fetching ${args.url}: ${err.message}]`;
     }
@@ -1285,6 +1530,30 @@ const toolHandlers = {
         : (terrain ? " [terrain: Void]" : "");
       return `--- ${i + 1}. (score: ${r.score.toFixed(2)}) ${r.meta.file || r.meta.path || "?"}${terrainHint} ---\n${r.text.slice(0, 500)}`;
     }).join("\n\n");
+  },
+
+  async verbatim_search(args) {
+    try {
+      const result = engineSearch(args.query, Math.min(args.limit || 5, 40));
+      if (!result.passages.length) return "(no verbatim spans found)";
+      const lines = result.passages.map((p, i) => {
+        return `[${i + 1}] span:${p.span_id} score:${p.score.toFixed(2)} source:${p.source.slice(0, 60)} byte:${p.byte_start}-${p.byte_end}\n${p.text.slice(0, 600)}`;
+      });
+      return `Found ${result.total} verbatim spans:\n\n` + lines.join("\n\n") +
+        (result.gaps?.length ? `\n\n[Gaps: ${result.gaps.join("; ")}]` : "");
+    } catch (err) {
+      return `[Error: ${err.message}]`;
+    }
+  },
+
+  async verbatim_read(args) {
+    try {
+      const result = engineReadSpan(args.span_id, args.max_bytes || 4000);
+      if (result.error) return `[Error: ${result.error}]`;
+      return `span:${result.span_id} source:${result.source_id} byte:${result.byte_start}-${result.byte_end} verbatim:${result.verbatim} truncated:${result.truncated}\n\n${result.text}`;
+    } catch (err) {
+      return `[Error: ${err.message}]`;
+    }
   },
 
   async memory_stats() {
@@ -1473,6 +1742,68 @@ const toolHandlers = {
     }
     return lines.join("\n");
   },
+
+  async holonic_task(args) {
+    const taskDescription = args.task || args.description || "";
+    if (!taskDescription) return "Error: 'task' parameter is required.";
+
+    const model = args.model || "gemma2:2b";
+    const outputPath = args.output_path || null;
+
+    // Adapter: wraps the engine-ground session into HolonicTask's expected search API
+    const engineAdapter = (() => {
+      try {
+        return {
+          search(query, { limit = 5 } = {}) {
+            const result = engineSearch(query, limit);
+            return (result.passages || []).slice(0, limit).map(p => ({
+              text: (p.text || p.preview || "").slice(0, 800),
+              source: p.source || p.source_id || "?",
+              score: p.score || 0,
+              span_id: p.span_id,
+              byte_start: p.byte_start,
+              byte_end: p.byte_end,
+            })).filter(r => r.text.length > 20);
+          },
+        };
+      } catch {
+        return null;
+      }
+    })();
+
+    const task = new HolonicTask({
+      task: taskDescription,
+      model,
+      engine: engineAdapter,
+      outputPath,
+    });
+
+    let lastEvent = "planning";
+    try {
+      const result = await task.run({
+        onProgress: (phase, msg) => { lastEvent = `${phase}: ${msg.slice(0, 80)}`; },
+      });
+
+      const totalMc = result.results.reduce((a, r) => a + (r.citations ? r.citations.length : 0), 0);
+      const totalSurf = result.results.reduce((a, r) => a + (r.surf ? r.surf.length : 0), 0);
+      const summary = {
+        sections: result.results.length,
+        chars: result.output.length,
+        pages: Math.round(result.output.length / 3000),
+        mechanicalCitations: totalMc,
+        surfPassages: totalSurf,
+        gaps: result.gaps.length,
+        metrics: result.metrics,
+        output_path: result.path,
+        output_preview: result.output.slice(0, 2000),
+      };
+
+      store.ingest(`holonic_task: ${taskDescription.slice(0, 100)} (${summary.sections} sections, ${summary.chars} chars)`, "tool", { type: "holonic_task" });
+      return JSON.stringify(summary, null, 2);
+    } catch (err) {
+      return `[holonic_task failed at ${lastEvent}]: ${err.message}`;
+    }
+  },
 };
 
 // ── MCP Client ──
@@ -1587,8 +1918,42 @@ async function getAllTools() {
 
 // ── Tool calling loop ──
 
-async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, forceModel = null) {
+async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, forceModel = null, webSearch = true) {
   const effectiveTools = tools && tools.length > 0 ? tools : await getAllTools();
+
+  // Inject intelligent search guidance as a system message.
+  // This tells the model HOW to use web_search effectively — when to search,
+  // how to formulate queries, and how to iterate on results.
+  // Only injected when web search is enabled.
+  if (webSearch && !messages.some(m => m.role === "system" && m.content?.includes("Web Search Strategy"))) {
+    messages.unshift({
+      role: "system",
+      content: [
+        "You are EO, a focused research and engineering assistant with access to web search.",
+        "",
+        "## Web Search Strategy",
+        "You have web_search and web_fetch tools. Use them when you need current information, facts, or data not in your training or the local context.",
+        "",
+        "**When to search:**",
+        "- The user asks about current events, recent developments, or time-sensitive information",
+        "- You need specific data (prices, stats, specifications, APIs, documentation)",
+        "- The question requires domain knowledge you're uncertain about",
+        "- The local codebase or memory doesn't contain the answer",
+        "",
+        "**How to search effectively:**",
+        "- Formulate keyword-rich queries — be specific, not vague",
+        "- Start broad, then narrow: use type='fast' for quick orientation, type='deep' for comprehensive research",
+        "- Read search results first, then use web_fetch to get full content from promising URLs",
+        "- If results are thin, try different query formulations or use site: to target known domains",
+        "- Use livecrawl='preferred' for breaking news or frequently updated content",
+        "",
+        "**How to use results:**",
+        "- Synthesize information from multiple sources — don't rely on a single result",
+        "- Cite sources when presenting facts",
+        "- If search returns nothing useful, try reformulating the query before giving up",
+      ].join("\n"),
+    });
+  }
 
   // An explicit forceModel is a deliberate human/client override — it wins
   // outright and never enters the learned-routing ledger (there'd be no
@@ -1724,7 +2089,17 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  const effectiveTools = tools && tools.length > 0 ? tools : await getAllTools();
+  let effectiveTools = tools && tools.length > 0 ? tools : await getAllTools();
+
+  // Filter web search tools when the toggle is off
+  if (opts.webSearch === false) {
+    const webTools = new Set(["web_search", "web_fetch"]);
+    effectiveTools = effectiveTools.filter(t => {
+      const name = t.function?.name || t.name || "";
+      return !webTools.has(name);
+    });
+  }
+
   sendSSE("tools_available", { count: effectiveTools.length });
 
   // Engine-grounded context: search + fold before the LLM sees anything.
@@ -1741,17 +2116,13 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
       });
 
       if (groundResult.context) {
-        const citationList = groundResult.citations
-          .map((c, i) => `[${i + 1}] ${c.source.slice(0, 80)}`)
-          .join("\n");
         const systemContext =
           `You are answering a question grounded in SOURCE MATERIAL below. ` +
           `Cite specific passages using bracketed numbers like [1], [2], etc. ` +
           `Do NOT invent facts beyond what the sources contain. If the sources ` +
           `do not contain the answer, say so honestly.\n\n` +
           `--- Source material (${groundResult.total} passages found, ${groundResult.folded} folded, ${groundResult.tokens} tokens) ---\n` +
-          `${groundResult.context}\n\n` +
-          `[Sources]\n${citationList || "(none)"}`;
+          `${groundResult.context}`;
 
         // Inject before the user message
         const userIdx = messages.findIndex((m) => m.role === "user" && m.content === query);
@@ -1765,11 +2136,14 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
           sourceCount: groundResult.total,
           foldedCount: groundResult.folded,
           tokens: groundResult.tokens,
-          citations: groundResult.citations.map((c) => ({
-            index: groundResult.citations.indexOf(c) + 1,
-            source: c.source,
+          citations: groundResult.citations.map((c, i) => ({
+            index: i + 1,
+            span_id: c.span_id,
+            source_id: c.source_id,
+            byte_start: c.byte_start,
+            byte_end: c.byte_end,
             score: Math.round(c.score * 100) / 100,
-            preview: c.text.slice(0, 200),
+            text: c.text,
           })),
           gaps: groundResult.gaps || [],
         });
@@ -1782,7 +2156,7 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
   try {
     const content = await runToolLoop(messages, effectiveTools, (evt) => {
       sendSSE(evt.type, evt);
-    }, 8, forceModel);
+    }, 8, forceModel, opts.webSearch);
     sendSSE("done", { content });
 
     // Persist assistant response in discourse store
@@ -2023,6 +2397,81 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // Verbatim endpoints — direct engine search, NO model call.
+  // Returns exact byte-offset anchored spans from ingested text.
+  // ══════════════════════════════════════════════════════════════
+
+  // Search the engine for verbatim spans matching a query.
+  if (req.method === "GET" && req.url.startsWith("/api/verbatim")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    // Read a specific span by ID
+    if (url.pathname === "/api/verbatim/read") {
+      const spanId = url.searchParams.get("id");
+      const maxBytes = parseInt(url.searchParams.get("max") || "4000", 10);
+      if (!spanId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'id' parameter" }));
+        return;
+      }
+      try {
+        const result = engineReadSpan(spanId, maxBytes);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // Search verbatim spans
+    let query = url.searchParams.get("q");
+    const limit = parseInt(url.searchParams.get("limit") || "10", 10);
+    const maxChars = parseInt(url.searchParams.get("max_chars") || "800", 10);
+    if (!query) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing 'q' parameter" }));
+      return;
+    }
+    try {
+      // Try the query as-is first (the engine's dense retrieval may find
+      // semantically related passages even with diacritic differences)
+      let result = engineSearch(query, Math.min(limit, 40), { maxChars });
+
+      // If the query returned gaps (no_evidence_matched) and the query has
+      // diacritics or the query might differ from stored text's diacritics,
+      // retry with a broadened query: strip diacritics so "Natasha" matches
+      // "Natásha", then re-search. This is the only model-free fix for the
+      // Natásha↔Natasha problem — the engine's dense embedder treats them
+      // as different tokens.
+      if (result.passages.length === 0) {
+        const stripped = query.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+        if (stripped !== query) {
+          result = engineSearch(stripped, Math.min(limit, 40), { maxChars });
+          if (result.passages.length > 0) {
+            result.diacritic_fallback = true;
+            result.diacritic_query = stripped;
+          }
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        query,
+        total: result.total,
+        passages: result.passages,
+        gaps: result.gaps,
+        verbatim: true,
+        note: "These are exact verbatim spans from the engine — byte-accurate, no model involved.",
+      }));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // Connect an MCP server
   if (req.method === "POST" && req.url === "/mcp/connect") {
     let body = "";
@@ -2084,6 +2533,7 @@ const server = http.createServer((req, res) => {
 
         await handleToolStream(res, messages, tools, data.model || null, {
           grounded: !!data.grounded,
+          webSearch: data.webSearch !== false,
           session: sessionId,
           groundBudget: data.groundBudget ?? 600,
           groundMaxUnits: data.groundMaxUnits ?? 8,
@@ -2338,11 +2788,50 @@ async function start() {
     console.error(`[proxy] Warning: code loading incomplete: ${err.message}`);
   }
 
-  // Build content index (async, error-isolated)
-  try {
-    await buildContentIndex();
-  } catch (err) {
-    console.error(`[proxy] Warning: content index build failed: ${err.message}`);
+  // Build content index (server starts first, index builds in background
+  // — deferred via setImmediate so synchronous file I/O inside the scan
+  // doesn't block the event loop before server.listen)
+  setImmediate(() => {
+    buildContentIndex().catch(err => {
+      console.error(`[proxy] Warning: content index build failed: ${err.message}`);
+    });
+  });
+
+  // Auto-ingest War and Peace (pg2600.txt) for verbatim span retrieval
+  const WAR_AND_PEACE_PATHS = [
+    path.resolve(REPO_PATH, "pg2600.txt"),
+    path.resolve(REPO_PATH, "..", "pg2600.txt"),
+    path.resolve(process.env.HOME || "/Users/mlacy", "Downloads", "pg2600.txt"),
+    path.resolve(process.env.HOME || "/Users/mlacy", "Desktop", "pg2600.txt"),
+  ];
+  for (const wpPath of WAR_AND_PEACE_PATHS) {
+    try {
+      if (fs.existsSync(wpPath)) {
+        const wpResult = engineIngestFile(wpPath);
+        console.error(`[proxy] Ingested War and Peace: ${wpPath} (${wpResult.chunks} chunks)`);
+        break;
+      }
+    } catch (err) {
+      console.error(`[proxy] War and Peace ingest skipped at ${wpPath}: ${err.message}`);
+    }
+  }
+
+  // Also look for Frankenstein (pg84.txt) in the repo dir
+  const FRANKENSTEIN_PATHS = [
+    path.resolve(REPO_PATH, "pg84.txt"),
+    path.resolve(REPO_PATH, "..", "pg84.txt"),
+    path.resolve(process.env.HOME || "/Users/mlacy", "Downloads", "pg84.txt"),
+  ];
+  for (const frPath of FRANKENSTEIN_PATHS) {
+    try {
+      if (fs.existsSync(frPath)) {
+        const frResult = engineIngestFile(frPath);
+        console.error(`[proxy] Ingested Frankenstein: ${frPath} (${frResult.chunks} chunks)`);
+        break;
+      }
+    } catch (err) {
+      console.error(`[proxy] Frankenstein ingest skipped at ${frPath}: ${err.message}`);
+    }
   }
 
   // Verify upstream is reachable
