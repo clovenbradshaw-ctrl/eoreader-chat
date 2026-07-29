@@ -2137,6 +2137,9 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
           sourceCount: groundResult.total,
           foldedCount: groundResult.folded,
           tokens: groundResult.tokens,
+          // The verbatim system context injected above — clients surface this
+          // as the prompt actually sent, rather than reconstructing it.
+          systemContext,
           citations: groundResult.citations.map((c, i) => ({
             index: i + 1,
             span_id: c.span_id,
