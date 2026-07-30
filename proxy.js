@@ -996,14 +996,6 @@ const TOOL_DEFINITIONS = [
   {
     type: "function",
     function: {
-      name: "memory_stats",
-      description: "Get memory store statistics.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "fetch_attachment",
       description: "Fetch the full content of an attached file from the discourse store. Use this when you need to read a file that was uploaded as an attachment.",
       parameters: {
@@ -1065,7 +1057,7 @@ const TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "codebase_lookup",
-      description: "Get detailed information about a specific module file: its imports, exports, definitions, entities implemented, and cross-references.",
+      description: "Get detailed information about a specific module file: its imports (resolved to the modules they point to), what imports it, exports, definitions, and entities implemented. Good for understanding a module and its dependencies in one call.",
       parameters: {
         type: "object",
         properties: {
@@ -1094,36 +1086,9 @@ const TOOL_DEFINITIONS = [
   {
     type: "function",
     function: {
-      name: "codebase_related",
-      description: "Show what a module imports, what imports it, and what entities it implements. Good for understanding dependencies and impact analysis.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "Relative path to the module" },
-        },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "codebase_entities",
       description: "List all eoreader5 conceptual entities (cube, presence, fold, store, discourse, spine, reaction, etc.) mapped to their implementation files.",
       parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "codebase_api",
-      description: "Show the API surface (exports + definitions) for a package or directory.",
-      parameters: {
-        type: "object",
-        properties: {
-          prefix: { type: "string", description: "Package or directory prefix (e.g. 'packages/engine/search')" },
-        },
-      },
     },
   },
   {
@@ -1374,8 +1339,11 @@ const toolHandlers = {
         const html = await resp.text();
         const results = [];
 
-        // Parse DuckDuckGo HTML results — extract result blocks
-        const resultBlocks = html.split('<div class="result__body">');
+        // Parse DuckDuckGo HTML results — extract result blocks.
+        // DDG wraps the marker class in a compound class list (e.g.
+        // class="links_main links_deep result__body"), so match on the
+        // class being present rather than an exact attribute string.
+        const resultBlocks = html.split(/<div class="[^"]*\bresult__body\b[^"]*">/);
         // Skip first split (content before any result)
         for (let i = 1; i < resultBlocks.length && results.length < numResults; i++) {
           const block = resultBlocks[i];
@@ -1556,10 +1524,6 @@ const toolHandlers = {
     }
   },
 
-  async memory_stats() {
-    return JSON.stringify({ entries: store.size, max: STORE_MAX, ttl_ms: STORE_TTL });
-  },
-
   async fetch_attachment(args) {
     const sessionId = args.session || "default";
     const content = await discourse.getAttachmentContent(sessionId, args.name);
@@ -1654,8 +1618,28 @@ const toolHandlers = {
     if (mod.entities?.length) lines.push(`Entities: ${mod.entities.join(", ")}`);
     if (mod.definitions?.length) lines.push(`Definitions: ${mod.definitions.map(d => `${d.name} (${d.type}:${d.line})`).join(", ")}`);
     if (mod.exports?.length) lines.push(`Exports: ${mod.exports.map(e => `${e.name} (${e.type}:${e.line})`).join(", ")}`);
-    if (mod.imports?.length) lines.push(`Imports: ${mod.imports.map(i => i.spec).join(", ")}`);
-    if (mod.importedBy?.length) lines.push(`Imported by: ${mod.importedBy.map(i => i.by).join(", ")}`);
+
+    // Resolve imports/importedBy to the modules they point to (not just raw specs)
+    const rel = contentIndex.related(args.path);
+    if (!rel.error && rel.imports?.length) {
+      lines.push(`\nImports:`);
+      for (const m of rel.imports.slice(0, 15)) lines.push(`  ${m.repoRel} — ${(m.header || "").slice(0, 80)}`);
+    } else if (mod.imports?.length) {
+      lines.push(`Imports: ${mod.imports.map(i => i.spec).join(", ")}`);
+    }
+    if (!rel.error && rel.importedBy?.length) {
+      lines.push(`\nImported by:`);
+      for (const m of rel.importedBy.slice(0, 15)) lines.push(`  ${m.repoRel} — ${(m.header || "").slice(0, 80)}`);
+    } else if (mod.importedBy?.length) {
+      lines.push(`Imported by: ${mod.importedBy.map(i => i.by).join(", ")}`);
+    }
+    if (!rel.error && rel.entities?.length) {
+      lines.push(`\nEntity implementations:`);
+      for (const e of rel.entities) {
+        lines.push(`  ${e.name}: ${e.description || "(no description)"}`);
+        for (const f of e.files) lines.push(`    → ${f.path}`);
+      }
+    }
     return lines.join("\n");
   },
 
@@ -1672,33 +1656,6 @@ const toolHandlers = {
     }).join("\n\n");
   },
 
-  async codebase_related(args) {
-    if (!contentIndex) return "[Content index not built]";
-    const rel = contentIndex.related(args.path);
-    if (rel.error) return rel.error;
-    const lines = [
-      `=== ${rel.module.repoRel} ===`,
-      `Header: ${rel.module.header || "(none)"}`,
-      `Entities: ${(rel.module.entities || []).join(", ") || "none"}`,
-    ];
-    if (rel.imports?.length) {
-      lines.push(`\nImports:`);
-      for (const m of rel.imports.slice(0, 15)) lines.push(`  ${m.repoRel} — ${(m.header || "").slice(0, 80)}`);
-    }
-    if (rel.importedBy?.length) {
-      lines.push(`\nImported by:`);
-      for (const m of rel.importedBy.slice(0, 15)) lines.push(`  ${m.repoRel} — ${(m.header || "").slice(0, 80)}`);
-    }
-    if (rel.entities?.length) {
-      lines.push(`\nEntity implementations:`);
-      for (const e of rel.entities) {
-        lines.push(`  ${e.name}: ${e.description || "(no description)"}`);
-        for (const f of e.files) lines.push(`    → ${f.path}`);
-      }
-    }
-    return lines.join("\n");
-  },
-
   async codebase_entities() {
     if (!contentIndex) return "[Content index not built]";
     const ents = contentIndex.entityIndex();
@@ -1708,19 +1665,6 @@ const toolHandlers = {
       const desc = e.description ? `— ${e.description.slice(0, 150)}` : "";
       const files = e.files.map(f => `  ${f.repo}:${f.path}`).join("\n");
       return `${name} ${desc}\n${files}`;
-    }).join("\n\n");
-  },
-
-  async codebase_api(args) {
-    if (!contentIndex) return "[Content index not built]";
-    const apis = contentIndex.apiSurface(args.prefix);
-    if (!apis.length) return `No API surface found for prefix: ${args.prefix}`;
-    return apis.map(a => {
-      const parts = [`${a.path}`];
-      if (a.entities?.length) parts.push(`  Entities: ${a.entities.join(", ")}`);
-      if (a.exports?.length) parts.push(`  Exports: ${a.exports.map(e => `${e.name}(${e.type})`).join(", ")}`);
-      if (a.definitions?.length) parts.push(`  Defs: ${a.definitions.map(d => `${d.name}(${d.type})`).join(", ")}`);
-      return parts.join("\n");
     }).join("\n\n");
   },
 

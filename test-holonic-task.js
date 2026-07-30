@@ -99,7 +99,7 @@ class MockEngine {
         return lower.includes(clean);
       });
       if (hasMatch) {
-        activated.push(p.text);
+        activated.push({ id: p.id, text: p.text });
       }
     }
     return activated;
