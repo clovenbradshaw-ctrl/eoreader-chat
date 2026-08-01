@@ -1,0 +1,41 @@
+{
+  "startTime": 1785339790269,
+  "endTime": 1785339852131,
+  "duration": 61862,
+  "entries": [
+    {
+      "ts": 1785339790273,
+      "elapsed": 4,
+      "phase": "proxy_start",
+      "summary": "Starting proxy.js..."
+    },
+    {
+      "ts": 1785339791804,
+      "elapsed": 1535,
+      "phase": "proxy_start",
+      "summary": "Killed existing proxy (--fresh)"
+    },
+    {
+      "ts": 1785339852131,
+      "elapsed": 61862,
+      "phase": "proxy_start_failed",
+      "stderr": "[proxy] Loading /Users/mlacy/Documents/Default Project...\n[proxy] 10001 chunks loaded in 49915ms\n[proxy] Ingested War and Peace: /Users/mlacy/Downloads/pg2600.txt (1578 chunks)\n"
+    },
+    {
+      "ts": 1785339852131,
+      "elapsed": 61862,
+      "phase": "fatal",
+      "error": "Proxy did not start within 60s",
+      "stack": "Error: Proxy did not start within 60s\n    at startProxy (file:///Users/mlacy/Documents/Default%20Project/eoreader-chat/test-eochat-audit.mjs:414:9)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async main (file:///Users/mlacy/Documents/Default%20Project/eoreader-chat/test-eochat-audit.mjs:432:17)"
+    }
+  ],
+  "summary": {
+    "totalEvents": 4,
+    "phases": [
+      "proxy_start",
+      "proxy_start_failed",
+      "fatal"
+    ],
+    "errors": 1
+  }
+}

@@ -33,8 +33,14 @@ import fsp from "fs/promises";
 import path from "path";
 
 import { createModelRouter } from "./model-router.js";
-import { ensureSession, engineIngestFile, engineIngestText, engineGroundQuery, engineSearch, engineReadSpan, engineReadSegment, engineReadContext, engineStats, engineListSources } from "./engine-ground.js";
+import { cellOf } from "@eoreader/engine/operators";
+import { ensureSession, engineIngestFile, engineIngestText, engineGroundQuery, engineSearch, engineReadSpan, engineReadSegment, engineReadSourceBytes, engineReadContext, engineStats, engineListSources, engineFoldSource, engineDeleteSource, engineListRecycleBin, engineRestoreSource, enginePurgeSource, enginePurgeRecycleBin, engineRecycleBinStats, engineTerrainReport, outlineOfText, engineOutlineOfSource } from "./engine-ground.js";
+import { loadCorefPrior, activatePriors } from "./priors-bridge.js";
+// Static, not dynamic: the request handler is synchronous, and the module only
+// catalogs on import — ingest stays lazy behind ensurePriorsIngested().
+import * as priorsSource from "./priors-source.js";
 import { HolonicTask } from "./holonic-task.js";
+import { validateCitations, citedNumbers, buildGroundedSystemMessage, voidedAnswer } from "./grounding-gate.js";
 
 // ── CLI args with validation ──
 
@@ -56,9 +62,22 @@ const STORE_TTL = parseArg("store-ttl", 3_600_000, Number);
 const STORE_MAX = parseArg("store-max", 10_000, Number);
 const MEMORY_DIR = path.join(REPO_PATH, "memory");
 
+// Boot-time corpus ingest runs in the background so the server can listen
+// immediately. Until it finishes, the engine holds only part of the corpus — a
+// query in that window returned the ordinary `no_evidence_matched` gap, which
+// is indistinguishable from "your sources genuinely do not say this". They are
+// different facts and must not read alike, so warmup is tracked and reported.
+const corpusWarmup = { started: false, ready: false };
+
 // ── Model routing ──
 const TINY_MODEL = parseArg("tiny-model", "phi4-mini:latest");
 const MEDIUM_MODEL = parseArg("medium-model", "qwen2.5-coder:7b");
+// A turn that finishes but blows past this reads as a routing FAILURE, not a
+// success — "fast every time" is the actual product requirement, and a
+// success signal blind to latency cannot route toward it. 8s is a chat
+// reply's outer bound before it reads as broken, not a generation-quality
+// target.
+const LATENCY_BUDGET_MS = parseArg("latency-budget-ms", 8000, Number);
 
 function selectModel(messages) {
   const text = (messages || []).map(m => m.content || "").join(" ");
@@ -105,6 +124,53 @@ try {
   modelRouter = null;
 }
 
+// ── Prompt budgeting from measured latency ──
+//
+// The grounding prompt used to be sized by a de facto budget (2400 tokens)
+// no matter which model served the turn. A slow model under that budget blows
+// past LATENCY_BUDGET_MS; a fast model is under-fed and answers with less of
+// the evidence it could have had. Both are fixed the same way: measure each
+// model's actual prefill speed on real turns (Ollama reports the timings for
+// every /api/chat response) and size the grounding prompt so its prefill
+// time — the part of the turn that prompt length actually moves — stays
+// inside the latency budget. The budget is a budget on the PROMPT, never on
+// the retrieval: everything retrieved is still served whole to the reader.
+const DEFAULT_GROUND_BUDGET = 2400;
+
+// model -> { calls, prefillTokensPerSec, avgOutputMs } — measured, per model
+// id, from Ollama's own per-call timings. Averages, not fits: enough signal
+// to trend a budget over a session without pretending the variance is noise.
+const latencyProfiles = new Map();
+
+function recordModelLatency(model, data) {
+  if (!model || !data || typeof data !== "object") return;
+  const prefillMs = Number(data.prompt_eval_duration) / 1e6;
+  const evalMs = Number(data.eval_duration) / 1e6;
+  const prefillTokens = Number(data.prompt_eval_count);
+  if (!Number.isFinite(prefillMs) || prefillMs <= 0 || !Number.isFinite(prefillTokens) || prefillTokens <= 0) return;
+  const prof = latencyProfiles.get(model) || { calls: 0, prefillTokensPerSec: 0, avgOutputMs: 0 };
+  prof.calls += 1;
+  const rate = (prefillTokens / prefillMs) * 1000;
+  prof.prefillTokensPerSec = prof.calls === 1 ? rate : (prof.prefillTokensPerSec * (prof.calls - 1) + rate) / prof.calls;
+  if (Number.isFinite(evalMs) && evalMs > 0) {
+    prof.avgOutputMs = prof.calls === 1 ? evalMs : (prof.avgOutputMs * (prof.calls - 1) + evalMs) / prof.calls;
+  }
+  latencyProfiles.set(model, prof);
+}
+
+// Grounding prompt token budget for `model`, sized so the prompt's prefill
+// fits LATENCY_BUDGET_MS once the model's own measured generation time is
+// reserved. Cold (fewer than 3 measured turns) keeps the default rather than
+// guessing a rate from nothing.
+function groundingPromptBudget(model) {
+  const prof = latencyProfiles.get(model);
+  if (!prof || prof.calls < 3) return DEFAULT_GROUND_BUDGET;
+  const reserveForGeneration = prof.avgOutputMs > 0 ? prof.avgOutputMs : LATENCY_BUDGET_MS * 0.6;
+  const prefillMs = Math.max(250, LATENCY_BUDGET_MS - reserveForGeneration);
+  const tokens = Math.floor((prof.prefillTokensPerSec * prefillMs) / 1000);
+  return Math.max(400, Math.min(tokens, 20000));
+}
+
 // ── Retry helper ──
 
 async function withRetry(fn, { label = "operation", maxRetries = 2, baseMs = 500 } = {}) {
@@ -138,22 +204,12 @@ async function safeFetch(url, options = {}, timeoutMs = 30_000) {
 }
 
 // ── EO Cube ──
-
-const OPERATORS = ["NUL", "SEG", "DEF", "SIG", "CON", "EVA", "INS", "SYN", "REC"];
-const TERRAINS = ["Void", "Entity", "Kind", "Field", "Link", "Network", "Atmosphere", "Lens", "Paradigm"];
-const STANCES = ["Clearing", "Dissecting", "Unraveling", "Tending", "Binding", "Tracing", "Cultivating", "Making", "Composing"];
-
-const DIAGONAL = {
-  NUL: [{ terrain: "Void", stance: "Clearing" }, { terrain: "Entity", stance: "Dissecting" }, { terrain: "Kind", stance: "Unraveling" }],
-  SEG: [{ terrain: "Field", stance: "Clearing" }, { terrain: "Link", stance: "Dissecting" }, { terrain: "Network", stance: "Unraveling" }],
-  DEF: [{ terrain: "Atmosphere", stance: "Clearing" }, { terrain: "Lens", stance: "Dissecting" }, { terrain: "Paradigm", stance: "Unraveling" }],
-  SIG: [{ terrain: "Void", stance: "Tending" }, { terrain: "Entity", stance: "Binding" }, { terrain: "Kind", stance: "Tracing" }],
-  CON: [{ terrain: "Field", stance: "Tending" }, { terrain: "Link", stance: "Binding" }, { terrain: "Network", stance: "Tracing" }],
-  EVA: [{ terrain: "Atmosphere", stance: "Tending" }, { terrain: "Lens", stance: "Binding" }, { terrain: "Paradigm", stance: "Tracing" }],
-  INS: [{ terrain: "Void", stance: "Cultivating" }, { terrain: "Entity", stance: "Making" }, { terrain: "Kind", stance: "Composing" }],
-  SYN: [{ terrain: "Field", stance: "Cultivating" }, { terrain: "Link", stance: "Making" }, { terrain: "Network", stance: "Composing" }],
-  REC: [{ terrain: "Atmosphere", stance: "Cultivating" }, { terrain: "Lens", stance: "Making" }, { terrain: "Paradigm", stance: "Composing" }],
-};
+//
+// The cell (terrain, stance) for an operator is derived from the engine's own
+// algebra (cellOf, @eoreader/engine/operators) — never a hand-copied table.
+// classifyCode/classifyMessage below only guess WHICH operator a piece of
+// content or a chat message performs; the cell that operator earns is fixed
+// by the algebra, not re-guessed here.
 
 function classifyCode(text) {
   if (/^export\s|^module\.exports/.test(text)) return "DEF";
@@ -179,8 +235,7 @@ function classifyMessage(text) {
 }
 
 function getCell(operator) {
-  const cells = DIAGONAL[operator] || DIAGONAL.NUL;
-  return cells[1] || cells[0];
+  return cellOf(operator, "Figure");
 }
 
 // ── Content Index (structural codebase index) ──
@@ -619,6 +674,52 @@ function contentSnapshot(text, url) {
   return [`[Source: ${url}]`, title ? `[Title: ${title}]` : '', `[${wordCount} words — excerpt below]`, '', excerpt].filter(Boolean).join('\n');
 }
 
+// ── Web history ──
+//
+// Every page a turn pulls in is appended here before it can be cited. The
+// engine holds the text; this holds the provenance — which URL, which query
+// pulled it, when, and where the raw bytes landed. Append-only and on disk, so
+// "why was this in my answer?" stays answerable after the process that fetched
+// it is gone. Ingesting from the web without this leaves the reader holding
+// citations to sources they never chose and cannot audit.
+const WEB_HISTORY_PATH = path.join(import.meta.dirname, "web-history.jsonl");
+const webHistory = [];
+
+function loadWebHistory() {
+  try {
+    for (const line of fs.readFileSync(WEB_HISTORY_PATH, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try { webHistory.push(JSON.parse(line)); } catch {}
+    }
+  } catch { /* no history yet — the first web fetch creates it */ }
+}
+loadWebHistory();
+
+function recordWebHistory(record) {
+  webHistory.push(record);
+  try {
+    fs.appendFileSync(WEB_HISTORY_PATH, JSON.stringify(record) + "\n");
+  } catch (err) {
+    console.error(`[proxy] web-history append failed: ${err.message}`);
+  }
+}
+
+// DuckDuckGo wraps every result href in a redirect
+// (//duckduckgo.com/l/?uddg=<encoded real url>&rut=…). Unwrap it so what we
+// hand back — and later ingest and cite — is the actual page, not a tracker.
+// Sponsored rows go through the same wrapper but resolve to y.js ad links;
+// they return "" so an ad never becomes a cited source.
+function decodeDdgHref(href) {
+  if (!href) return "";
+  let h = href.replace(/&amp;/g, "&");
+  const m = h.match(/[?&]uddg=([^&]+)/);
+  if (m) {
+    try { h = decodeURIComponent(m[1]); } catch { return ""; }
+  }
+  if (/\/y\.js\?|[?&]ad_provider=|[?&]ad_domain=/.test(h)) return "";
+  return h;
+}
+
 async function fetchAndSaveUrl(url) {
   try {
     const resp = await safeFetch(url, {
@@ -657,6 +758,48 @@ async function fetchAndSaveUrl(url) {
   } catch (e) {
     console.error(`[proxy] Fetch failed ${url}: ${e.message}`);
     return { text: null, filename: null, error: e.message };
+  }
+}
+
+// ── Citation validation ──
+//
+// The model sometimes cites [N] where N exceeds the number of grounding
+// passages — a fabricated reference. Replace those with a visible gap marker
+// so the reader never sees a fake citation. Valid citations are left alone.
+
+// One bounded retry that demands the model actually ground its answer. Fires
+// only when a turn produced NO citation despite offered passages — a total
+// failure state — so the extra call is strictly cheaper than serving a
+// model-only answer. Lower temperature: the task is mechanical, not creative.
+async function retryGrounded(messages, model, maxCitation, onEvent) {
+  const nudge = {
+    role: "system",
+    content: `Your previous answer used no citation from the SOURCE MATERIAL, so it could not be served. ` +
+      `Rewrite it now. Every factual claim must be grounded in a numbered source passage — cite with the ` +
+      `bracket numbers provided ([1]…[${maxCitation}]). If the sources do not contain the answer, say so in ` +
+      `one sentence and cite the closest passage you found. Do NOT answer from your own knowledge.`,
+  };
+  const body = {
+    model,
+    messages: [...messages, nudge],
+    stream: false,
+    options: { temperature: 0.2, num_predict: 4096 },
+  };
+  try {
+    if (onEvent) onEvent({ type: "llm_call", round: "grounding-retry", tools: 0, model });
+    const resp = await withRetry(() => safeFetch(`${TARGET}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 120000), { label: "Ollama grounding retry", maxRetries: 1 });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    recordModelLatency(model, data);
+    const text = (data.message?.content || "").trim();
+    return text || null;
+  } catch (err) {
+    console.error(`[proxy] grounding retry failed: ${err.message}`);
+    return null;
   }
 }
 
@@ -993,6 +1136,12 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+  // NOTE: there are deliberately NO priors_* tools here. Priors are witness-
+  // tier knowledge that STEERS retrieval; they are never model context. The
+  // model absorbs a prior's effect through the evidence it widens (see
+  // holonic-task.js's researchSubtask), never through a rule stated to it.
+  // Priors are surfaced to the USER instead — /api/priors* for browsing, and
+  // per-surf activation provenance for "what shaped this answer".
   {
     type: "function",
     function: {
@@ -1012,12 +1161,10 @@ const TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "terrain_report",
-      description: "Show terrain analysis for an ingested file: which of the 9 terrains (Void/Entity/Kind/Field/Link/Network/Atmosphere/Lens/Paradigm) are detected, Born-gate signal check, and structural evidence. Fully mechanical — no model call.",
+      description: "Show the engine's own measured cell occupancy across the 9-operator × 3-grain cube: which (operator, grain) cells are earned by a real organ, and which remain open questions. Not a per-file classification — that reading was refuted; this is a fact about the engine itself. Fully mechanical — no model call.",
       parameters: {
         type: "object",
-        properties: {
-          path: { type: "string", description: "Path to the ingested file to analyze" },
-        },
+        properties: {},
       },
     },
   },
@@ -1140,6 +1287,41 @@ function _renderTree(node, maxDepth, indent) {
     }
   }
   return parts.join("\n");
+}
+
+// Shared by the LLM-callable `holonic_task` tool and the dedicated
+// `/api/holonic` endpoint (the Compose UI surface) — one adapter
+// construction, two callers.
+function buildHolonicEngineAdapter() {
+  try {
+    return {
+      search(query, { limit = 5 } = {}) {
+        const result = engineSearch(query, limit);
+        return (result.passages || []).slice(0, limit).map(p => ({
+          text: (p.text || p.preview || "").slice(0, 800),
+          source: p.source || p.source_id || "?",
+          score: p.score || 0,
+          span_id: p.span_id,
+          byte_start: p.byte_start,
+          byte_end: p.byte_end,
+        })).filter(r => r.text.length > 20);
+      },
+      // Real per-text coref prior activation (priors-bridge.js), replacing
+      // the previously-missing method that left every production run with
+      // zero activated priors. Steering only — see holonic-task.js's
+      // executeSubtask; nothing here is ever shown to the model as text.
+      getPriors(text, sourceId) {
+        try {
+          const prior = loadCorefPrior(sourceId || "");
+          return activatePriors(text, prior);
+        } catch (err) {
+          return { activated: [], gap: `priors-bridge error: ${err.message}` };
+        }
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 const toolHandlers = {
@@ -1340,28 +1522,29 @@ const toolHandlers = {
         const results = [];
 
         // Parse DuckDuckGo HTML results — extract result blocks.
-        // DDG wraps the marker class in a compound class list (e.g.
-        // class="links_main links_deep result__body"), so match on the
-        // class being present rather than an exact attribute string.
-        const resultBlocks = html.split(/<div class="[^"]*\bresult__body\b[^"]*">/);
+        // Split on the class TOKEN, not a literal attribute: DDG emits
+        // class="links_main links_deep result__body", so matching the exact
+        // string '<div class="result__body">' silently found zero results.
+        const resultBlocks = html.split(/<div[^>]*\bclass="[^"]*\bresult__body\b[^"]*"[^>]*>/);
         // Skip first split (content before any result)
         for (let i = 1; i < resultBlocks.length && results.length < numResults; i++) {
           const block = resultBlocks[i];
           try {
             // Extract title
-            const titleMatch = block.match(/<a[^>]*class="result__a"[^>]*>(.*?)<\/a>/s);
+            const titleMatch = block.match(/<a[^>]*\bclass="[^"]*\bresult__a\b[^"]*"[^>]*>(.*?)<\/a>/s);
             const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, "").trim() : "";
 
             // Extract URL
-            const urlMatch = block.match(/<a[^>]*class="result__a"[^>]*href="(.*?)"/);
-            let url = urlMatch ? urlMatch[1] : "";
+            const urlMatch = block.match(/<a[^>]*\bclass="[^"]*\bresult__a\b[^"]*"[^>]*href="(.*?)"/)
+              || block.match(/<a[^>]*href="(.*?)"[^>]*\bclass="[^"]*\bresult__a\b/);
+            let url = urlMatch ? decodeDdgHref(urlMatch[1]) : "";
             if (url.startsWith("//")) url = "https:" + url;
             
             // Extract snippet
-            const snippetMatch = block.match(/<a[^>]*class="result__snippet"[^>]*>(.*?)<\/a>/s);
+            const snippetMatch = block.match(/<a[^>]*\bclass="[^"]*\bresult__snippet\b[^"]*"[^>]*>(.*?)<\/a>/s);
             let snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
             if (!snippet) {
-              const altMatch = block.match(/class="result__snippet"[^>]*>(.*?)<\/span>/s);
+              const altMatch = block.match(/\bclass="[^"]*\bresult__snippet\b[^"]*"[^>]*>(.*?)<\/(?:span|div|td)>/s);
               snippet = altMatch ? altMatch[1].replace(/<[^>]+>/g, "").trim() : "";
             }
 
@@ -1459,29 +1642,19 @@ const toolHandlers = {
       const bytes = await fsp.readFile(args.path);
       const content = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 
-      // Run terrain analysis via engine dispatch
+      // The engine's own measured cell occupancy — not a per-file classification
+      // (see engineTerrainReport in engine-ground.js: that reading is refuted).
       let terrainInfo = null;
       try {
-        const { buildReadingFromBytes } = await import(
-          "/Users/mlacy/Documents/Default Project/eoreader5/packages/engine/perceiver/dispatch.js"
-        );
-        const reading = await buildReadingFromBytes(bytes);
-        terrainInfo = {
-          covered: reading.terrain_report?.covered ?? [],
-          uncovered: reading.terrain_report?.uncovered ?? [],
-          signalDetected: reading.born_gate?.signalDetected ?? false,
-          dominantTerrain: reading.born_gate?.dominantTerrain ?? null,
-          medium: reading.medium,
-          evidence: reading.terrain_report?.evidence ?? {},
-        };
+        terrainInfo = engineTerrainReport();
       } catch (err) {
         terrainInfo = { error: err.message };
       }
 
       store.ingest(content.slice(0, 50000), "file", { path: args.path, terrain: terrainInfo });
-      const terrainSummary = terrainInfo?.signalDetected
-        ? ` Terrain: ${terrainInfo.covered.join(", ")}`
-        : " Terrain: Void (no signal detected)";
+      const terrainSummary = terrainInfo?.occupied
+        ? ` Engine coverage: ${terrainInfo.counts.occupied}/${terrainInfo.counts.total} cells occupied.`
+        : "";
       return `Ingested ${args.path} (${bytes.length} bytes).${terrainSummary}`;
     } catch (err) {
       return `[Error ingesting ${args.path}: ${err.message}]`;
@@ -1493,9 +1666,7 @@ const toolHandlers = {
     if (!results.length) return "(no matches in memory)";
     return results.map((r, i) => {
       const terrain = r.meta?.terrain;
-      const terrainHint = terrain?.signalDetected
-        ? ` [terrain: ${terrain.covered?.join(",")}]`
-        : (terrain ? " [terrain: Void]" : "");
+      const terrainHint = terrain?.counts ? ` [engine coverage: ${terrain.counts.occupied}/${terrain.counts.total}]` : "";
       return `--- ${i + 1}. (score: ${r.score.toFixed(2)}) ${r.meta.file || r.meta.path || "?"}${terrainHint} ---\n${r.text.slice(0, 500)}`;
     }).join("\n\n");
   },
@@ -1531,51 +1702,22 @@ const toolHandlers = {
     return content.slice(0, 15000);
   },
 
-  async terrain_report(args) {
+  async terrain_report() {
     try {
-      const { buildReadingFromBytes } = await import(
-        "/Users/mlacy/Documents/Default Project/eoreader5/packages/engine/perceiver/dispatch.js"
-      );
-      const bytes = await fsp.readFile(args.path);
-      const reading = await buildReadingFromBytes(bytes);
-      const report = reading.terrain_report;
-      const gate = reading.born_gate;
-
-      if (!report) return `[No terrain report available for ${args.path}]`;
-
+      const report = engineTerrainReport();
+      const cellLabel = (c) => `${c.op}·${c.grain}=${c.terrain}/${c.stance}`;
       const lines = [
-        `Terrain Report for: ${args.path}`,
-        `Medium: ${report.medium}`,
-        `Signal detected: ${gate?.signalDetected ? "YES" : "NO"} ${gate?.signalDetected ? "" : "(dominant: Void)"}`,
-        `Covered (${report.covered?.length ?? 0}/9): ${(report.covered ?? []).join(", ") || "none"}`,
-        `Uncovered: ${(report.uncovered ?? []).join(", ") || "none"}`,
+        `Engine cell occupancy (epoch ${report.epoch}): ${report.counts.occupied}/${report.counts.total} earned, ${report.counts.empty} open questions`,
         ``,
+        `Occupied:`,
+        ...report.occupied.map((c) => `  ${cellLabel(c)} (${c.organs.map((o) => o.id).join(", ")})`),
+        ``,
+        `Empty (open questions):`,
+        ...report.empty.map((c) => `  ${cellLabel(c)}`),
       ];
-
-      const ev = report.evidence ?? {};
-      if (ev.states != null) lines.push(`States: ${ev.states}`);
-      if (ev.events != null) lines.push(`Events: ${ev.events}`);
-      if (ev.categories != null) lines.push(`Categories: ${ev.categories}`);
-      if (ev.associations != null) lines.push(`Associations: ${ev.associations}`);
-      if (ev.voids != null) lines.push(`Voids: ${ev.voids}`);
-      if (ev.paradigms != null) lines.push(`Paradigms: ${ev.paradigms}`);
-      if (ev.atmospheres != null) lines.push(`Atmosphere descriptors: ${ev.atmospheres}`);
-      if (ev.lenses != null) lines.push(`Lens characteristics: ${ev.lenses}`);
-      if (ev.holonicLevels) lines.push(`Holonic: states=${ev.holonicLevels.states}, events=${ev.holonicLevels.events}, phases=${ev.holonicLevels.phases}`);
-      if (ev.dominantTerrain) lines.push(`Dominant terrain: ${ev.dominantTerrain}`);
-      if (ev.dominantStance) lines.push(`Dominant stance: ${ev.dominantStance}`);
-      if (ev.classifier) lines.push(`Classifier: ${ev.classifier}`);
-      if (ev.terrainAmplitudes) {
-        const top = ev.terrainAmplitudes
-          .filter((a) => a.amplitude > 0.01)
-          .sort((a, b) => b.amplitude - a.amplitude)
-          .slice(0, 5);
-        if (top.length) lines.push(`Top terrain amplitudes: ${top.map((t) => `${t.label}=${t.amplitude.toFixed(3)}`).join(", ")}`);
-      }
-
       return lines.join("\n");
     } catch (err) {
-      return `[Error analyzing ${args.path}: ${err.message}]`;
+      return `[Error building terrain report: ${err.message}]`;
     }
   },
 
@@ -1687,33 +1829,13 @@ const toolHandlers = {
     return lines.join("\n");
   },
 
-  async holonic_task(args) {
+  async holonic_task(args, onEvent) {
     const taskDescription = args.task || args.description || "";
     if (!taskDescription) return "Error: 'task' parameter is required.";
 
     const model = args.model || "gemma2:2b";
     const outputPath = args.output_path || null;
-
-    // Adapter: wraps the engine-ground session into HolonicTask's expected search API
-    const engineAdapter = (() => {
-      try {
-        return {
-          search(query, { limit = 5 } = {}) {
-            const result = engineSearch(query, limit);
-            return (result.passages || []).slice(0, limit).map(p => ({
-              text: (p.text || p.preview || "").slice(0, 800),
-              source: p.source || p.source_id || "?",
-              score: p.score || 0,
-              span_id: p.span_id,
-              byte_start: p.byte_start,
-              byte_end: p.byte_end,
-            })).filter(r => r.text.length > 20);
-          },
-        };
-      } catch {
-        return null;
-      }
-    })();
+    const engineAdapter = buildHolonicEngineAdapter();
 
     const task = new HolonicTask({
       task: taskDescription,
@@ -1725,7 +1847,21 @@ const toolHandlers = {
     let lastEvent = "planning";
     try {
       const result = await task.run({
-        onProgress: (phase, msg) => { lastEvent = `${phase}: ${msg.slice(0, 80)}`; },
+        onProgress: (phase, msg, data = {}) => {
+          lastEvent = `${phase}: ${msg.slice(0, 80)}`;
+          // Forward as its own named SSE event (holonic_plan, holonic_subtask_start,
+          // holonic_subtask_priors, holonic_subtask_iteration, holonic_subtask_done,
+          // holonic_replan_start, holonic_replan_done, holonic_assemble,
+          // holonic_done) — the generic sendSSE(evt.type, evt) in
+          // handleToolStream forwards any type verbatim.
+          //
+          // holonic_subtask_priors is the USER's window onto which priors are
+          // steering this surf. It travels the SSE channel only. Note that the
+          // `summary` returned below becomes a tool result and therefore enters
+          // the model's context — which is exactly why no prior information is
+          // put in it. Priors steer retrieval; they are never model context.
+          if (onEvent) onEvent({ type: `holonic_${phase}`, msg, ...data });
+        },
       });
 
       const totalMc = result.results.reduce((a, r) => a + (r.citations ? r.citations.length : 0), 0);
@@ -1862,61 +1998,158 @@ async function getAllTools() {
 
 // ── Tool calling loop ──
 
-async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, forceModel = null, webSearch = true) {
+// web_search returns formatted text ("[i] Title\n    URL: ...\n    snippet"),
+// not structured objects — parse the URLs back out so the pages behind them
+// can be ingested into the engine rather than staying as untraceable text.
+function parseWebSearchResults(resultStr) {
+  const out = [];
+  for (const block of resultStr.split(/\n\n+/)) {
+    const urlMatch = block.match(/URL:\s*(\S+)/);
+    if (!urlMatch) continue;
+    const lines = block.split("\n").map(l => l.trim()).filter(Boolean);
+    const titleLine = lines.find(l => /^\[\d+\]/.test(l));
+    const title = titleLine ? titleLine.replace(/^\[\d+\]\s*/, "") : urlMatch[1];
+    out.push({ title, url: urlMatch[1] });
+  }
+  return out;
+}
+
+const WEB_RESULT_FAILURE_RE = /^\[(Error|Search failed)/;
+
+// Scan assistant prose for JSON objects shaped like a tool call and convert
+// them into real calls. Only names the model was actually offered are
+// accepted — an unknown name is prose that happens to look like JSON, and
+// mistaking it for a call would invent a tool the turn never had.
+// Returns { calls, remainder } where remainder is the content minus the
+// consumed JSON, so any genuine prose around it survives.
+function salvageTextToolCalls(content, tools) {
+  const known = new Set(tools.map(t => t.function?.name || t.name).filter(Boolean));
+  const calls = [];
+  let remainder = content;
+
+  // Walk brace-balanced candidates rather than regex-matching nested JSON.
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] !== "{") continue;
+    let depth = 0, inStr = false, esc = false, end = -1;
+    for (let j = i; j < content.length; j++) {
+      const ch = content[j];
+      if (esc) { esc = false; continue; }
+      if (ch === "\\") { esc = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (ch === "{") depth++;
+      else if (ch === "}") { depth--; if (depth === 0) { end = j; break; } }
+    }
+    if (end === -1) break;
+
+    const raw = content.slice(i, end + 1);
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { continue; }
+    const name = parsed?.name;
+    if (typeof name === "string" && known.has(name) && ("arguments" in parsed || "parameters" in parsed)) {
+      const rawArgs = parsed.arguments ?? parsed.parameters ?? {};
+      calls.push({
+        id: `salvaged_${calls.length}_${Math.random().toString(36).slice(2, 8)}`,
+        type: "function",
+        function: {
+          name,
+          arguments: typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs),
+        },
+      });
+      remainder = remainder.replace(raw, "");
+      i = end;
+    }
+  }
+
+  // Strip the code fences that wrapped the consumed JSON, if any.
+  if (calls.length) {
+    remainder = remainder.replace(/```(?:json|tool_code)?\s*```/g, "").replace(/\s+/g, " ").trim();
+  }
+  return { calls, remainder };
+}
+
+// onWebContent(urls) — invoked after a web tool returns so the caller can
+// ingest those pages into the engine and re-ground. There is no separate
+// "web citation" record: a fetched page becomes a source with span_ids and
+// byte offsets exactly like an uploaded file, or it is not citable at all.
+// Search-guidance system message. Shared between handleToolStream (which must
+// inject it BEFORE the serving model is picked, so the pick sees the same
+// message history it will serve) and runToolLoop (whose own guard keeps a
+// double injection from ever happening).
+const WEB_SEARCH_STRATEGY_SYSTEM = [
+  "You are EO, a focused research and engineering assistant with access to web search.",
+  "",
+  "## Web Search Strategy",
+  "You have web_search and web_fetch tools. Use them when you need current information, facts, or data not in your training or the local context.",
+  "",
+  "**When to search:**",
+  "- The user asks about current events, recent developments, or time-sensitive information",
+  "- You need specific data (prices, stats, specifications, APIs, documentation)",
+  "- The question requires domain knowledge you're uncertain about",
+  "- The local codebase or memory doesn't contain the answer",
+  "",
+  "**How to search effectively:**",
+  "- Formulate keyword-rich queries — be specific, not vague",
+  "- Start broad, then narrow: use type='fast' for quick orientation, type='deep' for comprehensive research",
+  "- Read search results first, then use web_fetch to get full content from promising URLs",
+  "- If results are thin, try different query formulations or use site: to target known domains",
+  "- Use livecrawl='preferred' for breaking news or frequently updated content",
+  "",
+  "**How to use results:**",
+  "- Synthesize information from multiple sources — don't rely on a single result",
+  "- Cite sources when presenting facts",
+  "- If search returns nothing useful, try reformulating the query before giving up",
+].join("\n");
+
+async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, forceModel = null, webSearch = true, onWebContent = null, prepicked = null) {
   const effectiveTools = tools && tools.length > 0 ? tools : await getAllTools();
 
   // Inject intelligent search guidance as a system message.
   // This tells the model HOW to use web_search effectively — when to search,
   // how to formulate queries, and how to iterate on results.
-  // Only injected when web search is enabled.
+  // Only injected when web search is enabled. When the caller pre-picked the
+  // model (handleToolStream), it already injected this before the pick; the
+  // guard below makes that idempotent.
   if (webSearch && !messages.some(m => m.role === "system" && m.content?.includes("Web Search Strategy"))) {
-    messages.unshift({
-      role: "system",
-      content: [
-        "You are EO, a focused research and engineering assistant with access to web search.",
-        "",
-        "## Web Search Strategy",
-        "You have web_search and web_fetch tools. Use them when you need current information, facts, or data not in your training or the local context.",
-        "",
-        "**When to search:**",
-        "- The user asks about current events, recent developments, or time-sensitive information",
-        "- You need specific data (prices, stats, specifications, APIs, documentation)",
-        "- The question requires domain knowledge you're uncertain about",
-        "- The local codebase or memory doesn't contain the answer",
-        "",
-        "**How to search effectively:**",
-        "- Formulate keyword-rich queries — be specific, not vague",
-        "- Start broad, then narrow: use type='fast' for quick orientation, type='deep' for comprehensive research",
-        "- Read search results first, then use web_fetch to get full content from promising URLs",
-        "- If results are thin, try different query formulations or use site: to target known domains",
-        "- Use livecrawl='preferred' for breaking news or frequently updated content",
-        "",
-        "**How to use results:**",
-        "- Synthesize information from multiple sources — don't rely on a single result",
-        "- Cite sources when presenting facts",
-        "- If search returns nothing useful, try reformulating the query before giving up",
-      ].join("\n"),
-    });
+    messages.unshift({ role: "system", content: WEB_SEARCH_STRATEGY_SYSTEM });
   }
 
   // An explicit forceModel is a deliberate human/client override — it wins
   // outright and never enters the learned-routing ledger (there'd be no
-  // honest "the router chose this" claim to score).
+  // honest "the router chose this" claim to score). `prepicked` is the
+  // handleToolStream path: the model and its router commitment were chosen
+  // BEFORE grounding so the grounding prompt could be sized to that model's
+  // measured latency; the commitment still reveals here, once.
   let model, routerCtx;
-  if (forceModel) {
+  if (prepicked) {
+    model = prepicked.model;
+    routerCtx = prepicked.ctx;
+  } else if (forceModel) {
     model = forceModel;
     routerCtx = null;
   } else if (modelRouter) {
     ({ model, ctx: routerCtx } = modelRouter.pick(messages));
+    console.error(`[proxy] router picked ${model} (msgs=${messages.length}, chars=${messages.reduce((n, m) => n + (m.content || "").length, 0)})`);
   } else {
     model = selectModel(messages);
     routerCtx = null;
   }
 
+  const turnStartedAt = Date.now();
+
+  // "Success" for the router meant only "the tool loop finished cleanly" —
+  // measured directly: a 256-second reply and a 2-second reply from the same
+  // model both recorded as unqualified successes, so nothing in the learned
+  // routing signal could ever prefer the fast candidate over the slow one.
+  // Latency IS the thing being optimized for here, so it has to be part of
+  // the outcome the router scores, not a side effect nobody reveals to it.
   const revealOutcome = async (outcome) => {
     if (!routerCtx) return;
-    try { await modelRouter.reveal(routerCtx, outcome); }
+    const elapsedMs = Date.now() - turnStartedAt;
+    const gated = outcome === "success" && elapsedMs > LATENCY_BUDGET_MS ? "failure" : outcome;
+    try { await modelRouter.reveal(routerCtx, gated); }
     catch (err) { console.error(`[proxy] model-router reveal failed: ${err.message}`); }
+    if (prepicked) prepicked.revealed = true;
   };
 
   try {
@@ -1943,22 +2176,51 @@ async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, force
       }
 
       const data = await resp.json();
+
+      // Measure the model's real prefill/generation speed on this call. This
+      // is the "actual lag" the next turn's grounding prompt budget is sized
+      // from — never the fixed default once a model has been measured.
+      recordModelLatency(model, data);
+
       const msg = data.message || {};
+
+      // Smaller local models routinely emit a tool call as prose — a bare or
+      // fenced {"name":…,"arguments":…} in `content` with `tool_calls` empty.
+      // Left alone, that JSON streams to the reader AS the answer and the turn
+      // silently loses its grounding. Recover it into a real call instead.
+      if ((!msg.tool_calls || msg.tool_calls.length === 0) && msg.content) {
+        const salvaged = salvageTextToolCalls(msg.content, effectiveTools);
+        if (salvaged.calls.length) {
+          msg.tool_calls = salvaged.calls;
+          msg.content = salvaged.remainder;
+          if (onEvent) onEvent({ type: "tool_call_salvaged", count: salvaged.calls.length, names: salvaged.calls.map(c => c.function.name) });
+        }
+      }
 
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         messages.push({ role: "assistant", content: msg.content || "" });
-        if (onEvent) onEvent({ type: "response", content: msg.content || "", model });
+        if (onEvent) onEvent({ type: "response", content: msg.content || "", model, elapsedMs: Date.now() - turnStartedAt });
         await revealOutcome("success");
         return msg.content || "";
       }
 
-      const toolCalls = msg.tool_calls.map(tc => ({
-        id: tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        type: "function",
-        function: { name: tc.function?.name || tc.name, arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function?.arguments || {}) },
-      }));
+      // Ollama expects `arguments` as an object on the way back in — handing
+      // it a JSON *string* makes its parser fail with "Value looks like
+      // object, but can't find closing '}'" and kills the whole turn.
+      const toolCalls = msg.tool_calls.map(tc => {
+        const rawArgs = tc.function?.arguments ?? tc.arguments ?? {};
+        let argsObj = rawArgs;
+        if (typeof rawArgs === "string") {
+          try { argsObj = JSON.parse(rawArgs); } catch { argsObj = {}; }
+        }
+        return {
+          id: tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          type: "function",
+          function: { name: tc.function?.name || tc.name, arguments: argsObj },
+        };
+      });
 
-      if (onEvent) onEvent({ type: "tool_calls", calls: toolCalls.map(tc => ({ name: tc.function.name, args: tc.function.arguments })) });
+      if (onEvent) onEvent({ type: "tool_calls", calls: toolCalls.map(tc => ({ name: tc.function.name, args: JSON.stringify(tc.function.arguments) })) });
 
       messages.push({ role: "assistant", content: msg.content || "", tool_calls: toolCalls });
 
@@ -1985,7 +2247,12 @@ async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, force
         } else {
           const handler = toolHandlers[name];
           if (handler) {
-            try { result = await handler(args); }
+            // Handlers receive onEvent as a second (optional) argument so a
+            // long-running tool (e.g. holonic_task) can push its own named
+            // SSE events mid-flight instead of only returning a final
+            // result. Handlers that ignore the second argument (the vast
+            // majority) are unaffected.
+            try { result = await handler(args, onEvent); }
             catch (err) { result = `[Error calling ${name}: ${err.message}]`; }
           } else {
             result = `[Unknown tool: ${name}]`;
@@ -1997,9 +2264,20 @@ async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, force
 
         if (onEvent) onEvent({ type: "tool_result", name, result: resultStr.slice(0, 500) });
 
+        // A web hit is only worth anything once it is in the engine — hand the
+        // URLs to the caller to ingest and re-ground, then tell the model to
+        // cite the renumbered engine passages rather than the raw tool text.
+        let citeHint = "";
+        if (onWebContent && (name === "web_search" || name === "web_fetch") && !WEB_RESULT_FAILURE_RE.test(resultStr)) {
+          const urls = name === "web_search"
+            ? parseWebSearchResults(resultStr).map(r => r.url)
+            : (args.url ? [args.url] : []);
+          if (urls.length) citeHint = (await onWebContent(urls)) || "";
+        }
+
         messages.push({
           role: "tool",
-          content: resultStr.slice(0, 10000),
+          content: resultStr.slice(0, 10000) + citeHint,
           tool_call_id: tc.id || `call_${Date.now()}`,
         });
       }
@@ -2010,7 +2288,7 @@ async function runToolLoop(messages, tools, onEvent = null, maxRounds = 8, force
       messages.push({ role: "assistant", content: "[Max tool rounds reached. Please continue based on the results above.]" });
     }
     const finalContent = messages[messages.length - 1]?.content || "";
-    if (onEvent) onEvent({ type: "response", content: finalContent, model });
+    if (onEvent) onEvent({ type: "response", content: finalContent, model, elapsedMs: Date.now() - turnStartedAt });
     await revealOutcome("failure");
     return finalContent;
   } catch (err) {
@@ -2046,69 +2324,228 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
 
   sendSSE("tools_available", { count: effectiveTools.length });
 
-  // Engine-grounded context: search + fold before the LLM sees anything.
-  // Inject as a system message so the model answers from source material
-  // with inline citations, not from training-data recollection.
-  if (opts.grounded) {
-    const lastUser = [...messages].reverse().find((m) => m.role === "user");
-    if (lastUser) {
-      const query = lastUser.content || "";
-      const groundResult = engineGroundQuery(query, {
-        budget: opts.groundBudget ?? 600,
-        maxUnits: opts.groundMaxUnits ?? 8,
-        limit: opts.groundLimit ?? 15,
-        source: opts.groundSource,
-      });
-
-      if (groundResult.context) {
-        const systemContext =
-          `You are answering a question grounded in SOURCE MATERIAL below. ` +
-          `Cite specific passages using bracketed numbers like [1], [2], etc. ` +
-          `Do NOT invent facts beyond what the sources contain. If the sources ` +
-          `do not contain the answer, say so honestly.\n\n` +
-          `--- Source material (${groundResult.total} passages found, ${groundResult.folded} folded, ${groundResult.tokens} tokens) ---\n` +
-          `${groundResult.context}`;
-
-        // Inject before the user message
-        const userIdx = messages.findIndex((m) => m.role === "user" && m.content === query);
-        if (userIdx >= 0) {
-          messages.splice(userIdx, 0, { role: "system", content: systemContext });
-        } else {
-          messages.unshift({ role: "system", content: systemContext });
-        }
-
-        sendSSE("grounding", {
-          sourceCount: groundResult.total,
-          foldedCount: groundResult.folded,
-          tokens: groundResult.tokens,
-          // The verbatim system context injected above — clients surface this
-          // as the prompt actually sent, rather than reconstructing it.
-          systemContext,
-          citations: groundResult.citations.map((c, i) => ({
-            index: i + 1,
-            span_id: c.span_id,
-            source_id: c.source_id,
-            byte_start: c.byte_start,
-            byte_end: c.byte_end,
-            score: Math.round(c.score * 100) / 100,
-            text: c.text,
-          })),
-          gaps: groundResult.gaps || [],
-        });
-      } else {
-        sendSSE("grounding", { sourceCount: 0, empty: true, note: "No source material found in engine. Ingest files first." });
-      }
-    }
+  // Pick the serving model BEFORE grounding. The grounding prompt is the one
+  // variable-sized block in the request, and it is sized to this model's
+  // measured latency — so the pick has to happen first, and the commitment
+  // rides along into runToolLoop (which reveals it once the turn finishes).
+  // The search-strategy message is injected first so the router sees the same
+  // history it will serve; runToolLoop's own guard keeps this idempotent.
+  if (opts.webSearch !== false && !messages.some(m => m.role === "system" && m.content?.includes("Web Search Strategy"))) {
+    messages.unshift({ role: "system", content: WEB_SEARCH_STRATEGY_SYSTEM });
+  }
+  let prepicked = null;
+  if (forceModel) {
+    prepicked = { model: forceModel, ctx: null, revealed: false };
+  } else if (modelRouter) {
+    const picked = modelRouter.pick(messages);
+    prepicked = { model: picked.model, ctx: picked.ctx, revealed: false };
+    console.error(`[proxy] router picked ${picked.model} pre-grounding (msgs=${messages.length}, chars=${messages.reduce((n, m) => n + (m.content || "").length, 0)})`);
+  } else {
+    prepicked = { model: selectModel(messages), ctx: null, revealed: false };
   }
 
-  try {
-    const content = await runToolLoop(messages, effectiveTools, (evt) => {
-      sendSSE(evt.type, evt);
-    }, 8, forceModel, opts.webSearch);
-    sendSSE("done", { content });
+  // Engine-grounded context: search + fold before the LLM sees anything.
+  // Inject as a system message so the model answers from source material
+  // with inline citations, not from training-data recollection. Mandatory —
+  // there is no code path that skips this to answer from the model alone.
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const query = lastUser ? (lastUser.content || "") : null;
 
-    // Persist assistant response in discourse store
-    if (content?.length > 5 && opts.session) {
+  // One grounding pass. Re-runnable: after web pages are ingested, the same
+  // call re-searches the (now larger) engine and replaces the injected system
+  // message, so a web-sourced passage is numbered and cited by the identical
+  // mechanism as a file-sourced one.
+  let groundedSystemMsg = null;
+  let groundingEmptyNote = null;
+  const groundNow = () => {
+    if (query === null) return null;
+    // The fold budget IS the prompt budget — everything retrieved is still
+    // served whole to the reader (engineGroundQuery's `retrieved[].text`).
+    // What the model gets is trimmed to the serving model's measured latency.
+    const promptBudget = opts.groundBudget ?? groundingPromptBudget(prepicked.model);
+    const prof = latencyProfiles.get(prepicked.model);
+    const budgetSource = opts.groundBudget != null ? "explicit" : (prof && prof.calls >= 3 ? "measured" : "default");
+    const groundResult = engineGroundQuery(query, {
+      budget: promptBudget,
+      maxUnits: opts.groundMaxUnits ?? 16,
+      limit: opts.groundLimit ?? 30,
+      source: opts.groundSource,
+    });
+
+            const built = buildGroundedSystemMessage(groundResult, query, corpusWarmup.started && !corpusWarmup.ready);
+
+    // Install — or, on web re-grounding, replace in place (the model must not
+    // see two competing tables) — the system message the model answers from.
+    if (groundedSystemMsg) {
+      groundedSystemMsg.content = built.message.content;
+      groundedSystemMsg._citationCount = built.message._citationCount;
+    } else {
+      groundedSystemMsg = built.message;
+      const userIdx = messages.findIndex((m) => m.role === "user" && m.content === query);
+      if (userIdx >= 0) messages.splice(userIdx, 0, groundedSystemMsg);
+      else messages.unshift(groundedSystemMsg);
+    }
+
+    if (!groundResult.context) {
+      // Two different facts, reported differently: the corpus is still loading,
+      // or the sources really are silent on this. Either way no citation is
+      // possible, and under the grounding contract the answer must be a typed
+      // gap — the model was told it must not fall back on its own knowledge.
+      groundingEmptyNote = built.warming
+        ? "Document index still loading — no source passage could be retrieved yet."
+        : "No passage in your sources matched this question — the answer could not be grounded.";
+
+      sendSSE("grounding", {
+        sourceCount: 0,
+        empty: true,
+        warming: built.warming,
+        systemContext: groundedSystemMsg.content,
+        retrieved: [],
+        queryTerms: String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean),
+        gaps: groundResult.gaps || [],
+        note: groundingEmptyNote,
+      });
+      return groundResult;
+    }
+
+    sendSSE("grounding", {
+      sourceCount: groundResult.total,
+      foldedCount: groundResult.folded,
+      tokens: groundResult.tokens,
+      budget: groundResult.budget,
+      // Where the prompt budget came from: the caller's explicit value, the
+      // model's measured latency, or the cold-start default.
+      budgetSource,
+      dropped: groundResult.dropped,
+      // The query as the engine tokenized it, so the reader can see which of
+      // their words actually drove retrieval.
+      queryTerms: String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean),
+      // Every retrieved span, kept or dropped, with its ranking evidence. This
+      // is the whole retrieval step, emitted before the model is called at all.
+      retrieved: groundResult.retrieved || [],
+      // The verbatim system context injected above — clients surface this
+      // as the prompt actually sent, rather than reconstructing it.
+      systemContext: groundedSystemMsg.content,
+      citations: groundResult.citations.map((c, i) => ({
+        index: i + 1,
+        span_id: c.span_id,
+        source_id: c.source_id,
+        byte_start: c.byte_start,
+        byte_end: c.byte_end,
+        score: Math.round(c.score * 100) / 100,
+        text: c.text,
+      })),
+      gaps: groundResult.gaps || [],
+    });
+    return groundResult;
+  };
+
+  groundNow();
+
+  // Web pages are ingested as ordinary sources, then re-grounded. A page the
+  // engine cannot admit yields no citation at all rather than a bare URL the
+  // reader cannot check.
+  const ingestedUrls = new Set();
+  const onWebContent = async (urls) => {
+    const fresh = urls.filter(u => !ingestedUrls.has(u)).slice(0, 3);
+    if (!fresh.length) return "";
+    const admitted = [];
+    for (const url of fresh) {
+      ingestedUrls.add(url);
+      try {
+        const fetched = await fetchAndSaveUrl(url);
+        if (!fetched.text || fetched.text.length < 200) continue;
+        let label;
+        try {
+          const u = new URL(url);
+          label = (u.hostname.replace(/^www\./, "") + u.pathname).replace(/\/+$/, "").replace(/\//g, "_");
+        } catch { label = url.replace(/\//g, "_"); }
+        engineIngestText(fetched.text.slice(0, 500000), `source:${label}`, label);
+        admitted.push({ url, label });
+        const record = {
+          name: label, url, size: fetched.text.length,
+          session: opts.session || "default",
+          query: query || "",
+          ingestedAt: new Date().toISOString(),
+          savedPath: fetched.path || null,
+        };
+        recordWebHistory(record);
+        sendSSE("source_added", record);
+      } catch (err) {
+        sendSSE("gap", { type: "web_ingest_failed", url, reason: err.message });
+      }
+    }
+    if (!admitted.length) return "\n\n(None of these pages could be ingested — do not cite them.)";
+  // A grounding failure must not kill the turn — but the router commitment
+  // made above still needs its one reveal, or the step is silently unobserved.
+  try {
+    groundNow();
+  } catch (err) {
+    console.error(`[proxy] grounding failed: ${err.message}`);
+    sendSSE("gap", { type: "grounding_failed", reason: err.message });
+    if (prepicked?.ctx && !prepicked.revealed) {
+      try { await modelRouter.reveal(prepicked.ctx, "failure"); }
+      catch (e) { console.error(`[proxy] model-router reveal failed: ${e.message}`); }
+      prepicked.revealed = true;
+    }
+  }
+    return `\n\n(Ingested: ${admitted.map(a => a.label).join(", ")}. The SOURCE MATERIAL above has been refreshed — cite those numbered passages, not this tool output.)`;
+  };
+
+  try {
+    const rawContent = await runToolLoop(messages, effectiveTools, (evt) => {
+      sendSSE(evt.type, evt);
+    }, 8, forceModel, opts.webSearch, onWebContent, prepicked);
+
+    // Validate citations: replace fabricated [N] with a visible gap marker
+    // so the reader never sees a fake citation number.
+    const maxCitation = groundedSystemMsg
+      ? (groundedSystemMsg._citationCount || 0)
+      : 0;
+
+    // Grounding gate: an answer that cites none of the offered passages is
+    // MODEL-tier — it came from the model's own knowledge, not the reader's
+    // sources. It is voided, never served. "Everything must be grounded."
+    let content = maxCitation > 0 ? validateCitations(rawContent, maxCitation) : rawContent;
+    let voided = false;
+    let voidReason = null;
+
+    if (maxCitation === 0) {
+      // The reader's sources are silent (or still warming). No citation could
+      // possibly ground this answer, so whatever the model produced is voided
+      // and replaced with the typed gap itself.
+      voided = true;
+      voidReason = groundingEmptyNote
+        || "No passage in your sources matched this question — the answer could not be grounded and was not served.";
+      content = null;
+    } else if (citedNumbers(content, maxCitation).length === 0) {
+      // Passages were retrieved and offered, yet the model answered without a
+      // single citation. One bounded retry that demands grounding; a second
+      // uncited answer is voided rather than served.
+      const retried = await retryGrounded(messages, prepicked.model, maxCitation, (evt) => sendSSE(evt.type, evt));
+      if (retried && citedNumbers(retried, maxCitation).length > 0) {
+        content = validateCitations(retried, maxCitation);
+      } else {
+        voided = true;
+        voidReason = `The model cited none of the ${maxCitation} retrieved passage(s) — its answer came from its own knowledge and was voided rather than served.`;
+        content = null;
+      }
+    }
+
+    if (voided) {
+      content = voidedAnswer(voidReason);
+      sendSSE("gap", {
+        type: "ungrounded_answer_voided",
+        reason: voidReason,
+        availableCitations: maxCitation,
+      });
+    }
+
+    sendSSE("done", { content, voided });
+
+    // Persist assistant response in discourse store. A voided answer is a
+    // typed gap, not an assistant statement — nothing to remember.
+    if (!voided && content?.length > 5 && opts.session) {
       try {
         await discourse.addMessage(opts.session, "assistant", content);
       } catch (err) {
@@ -2116,6 +2553,13 @@ async function handleToolStream(res, messages, tools, forceModel = null, opts = 
       }
     }
   } catch (err) {
+    // runToolLoop reveals on its own internal failures; anything that threw
+    // before it ran (or was never reached) still owes the router its reveal.
+    if (prepicked?.ctx && !prepicked.revealed) {
+      try { await modelRouter.reveal(prepicked.ctx, "failure"); }
+      catch (e) { console.error(`[proxy] model-router reveal failed: ${e.message}`); }
+      prepicked.revealed = true;
+    }
     sendSSE("error", { message: err.message });
   }
   res.end();
@@ -2298,14 +2742,51 @@ const server = http.createServer((req, res) => {
     req.on("data", (c) => { body += c; });
     req.on("end", async () => {
       try {
-        const { path: ingestPath, content, name, session } = JSON.parse(body);
+        const { path: ingestPath, url: ingestUrl, content, name, session } = JSON.parse(body);
         const sessionId = session || "default";
+
+        // URL ingestion — fetch, strip markup, then fall through the same
+        // content path so a page becomes a first-class citable source, not a
+        // one-turn context injection.
+        if (ingestUrl && !content) {
+          const fetched = await fetchAndSaveUrl(ingestUrl);
+          if (!fetched.text) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: `Fetch failed for ${ingestUrl} — ${fetched.error || "no text"}` }));
+            return;
+          }
+          // The engine derives a display name by stripping everything up to the
+          // last slash, so a raw URL would come back "(unnamed)". Flatten
+          // host+path into one slash-free label; the URL rides alongside it.
+          let label;
+          try {
+            const u = new URL(ingestUrl);
+            label = (u.hostname.replace(/^www\./, "") + u.pathname).replace(/\/+$/, "").replace(/\//g, "_");
+          } catch { label = ingestUrl.replace(/\//g, "_"); }
+          const srcName = name || label || ingestUrl;
+          const sourceId = `source:${srcName}`;
+          const { engineIngestText } = await import("./engine-ground.js");
+          const result = engineIngestText(fetched.text.slice(0, 500000), sourceId, srcName);
+          const att = await discourse.addAttachment(sessionId, {
+            name: srcName,
+            content: fetched.text,
+            type: "url",
+            size: fetched.text.length,
+            ingestedAt: new Date().toISOString(),
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ...result, name: srcName, url: ingestUrl,
+            attachment: { name: att.name, type: att.type, size: att.size },
+          }));
+          return;
+        }
 
         // Content-based ingestion (from browser file picker)
         if (content) {
           const sourceId = `source:${name || "upload"}:${Date.now()}`;
           const { engineIngestText } = await import("./engine-ground.js");
-          const result = engineIngestText(content.slice(0, 500000), sourceId);
+          const result = engineIngestText(content.slice(0, 500000), sourceId, name || "upload");
 
           // Register as attachment in discourse
           const att = await discourse.addAttachment(sessionId, {
@@ -2324,12 +2805,29 @@ const server = http.createServer((req, res) => {
         // Path-based ingestion (from server filesystem)
         if (!ingestPath) {
           res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Missing 'path' or 'content' field" }));
+          res.end(JSON.stringify({ error: "Missing 'url', 'path' or 'content' field" }));
           return;
         }
-        const result = engineIngestFile(ingestPath);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(result));
+        try {
+          const result = engineIngestFile(ingestPath);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          // Idempotent: if already ingested, return success with existing source info
+          if (err.message?.includes("duplicate")) {
+            const existing = engineListSources().find(s => s.path === ingestPath);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              path: ingestPath,
+              alreadyIngested: true,
+              chunks: existing?.chunks || 0,
+              pool: existing?.pool || "corpus",
+              note: "Source already ingested",
+            }));
+          } else {
+            throw err;
+          }
+        }
       } catch (err) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err.message }));
@@ -2345,10 +2843,281 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // List ingested sources
-  if (req.method === "GET" && req.url === "/api/sources") {
+  // List ingested sources. Entries carry `kind` ("corpus" | "prior-raw" |
+  // "prior-card") and `pool`, so the UI can pill priors distinctly from texts
+  // instead of presenting witness-tier artifacts as if they were source material.
+  if (req.method === "GET" && req.url.startsWith("/api/sources")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const poolFilter = url.searchParams.get("pool");
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(engineListSources()));
+    res.end(JSON.stringify(engineListSources(poolFilter ? { pool: poolFilter } : {})));
+    return;
+  }
+
+  // Delete (soft-delete) a source — moves it to the recycle bin.
+  // Sources can be restored or permanently purged through /api/recycle-bin endpoints.
+  if (req.method === "DELETE" && req.url.startsWith("/api/sources")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const sourceKey = url.searchParams.get("source");
+    if (!sourceKey) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing 'source' query parameter" }));
+      return;
+    }
+    const result = engineDeleteSource(sourceKey, { pool: url.searchParams.get("pool") || undefined });
+    const status = result.error ? 404 : 200;
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  // ── Recycle bin endpoints ──
+
+  // List deleted sources
+  if (req.method === "GET" && req.url === "/api/recycle-bin") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(engineListRecycleBin()));
+    return;
+  }
+
+  // Recycle bin stats
+  if (req.method === "GET" && req.url === "/api/recycle-bin/stats") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(engineRecycleBinStats()));
+    return;
+  }
+
+  // Restore a source from the recycle bin
+  if (req.method === "POST" && req.url === "/api/recycle-bin/restore") {
+    let body = "";
+    req.on("data", (chunk) => body += chunk);
+    req.on("end", () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        return;
+      }
+      const sourceKey = parsed.source;
+      if (!sourceKey) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing 'source' field" }));
+        return;
+      }
+      const result = engineRestoreSource(sourceKey, { pool: parsed.pool || undefined });
+      const status = result.error ? 404 : 200;
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  // Permanently delete one source or empty the entire recycle bin
+  if (req.method === "DELETE" && req.url === "/api/recycle-bin") {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const sourceKey = url.searchParams.get("source");
+    if (sourceKey) {
+      const result = enginePurgeSource(sourceKey);
+      const status = result.error ? 404 : 200;
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } else {
+      const result = enginePurgeRecycleBin();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    }
+    return;
+  }
+
+  // The append-only provenance ledger for everything a web search pulled in.
+  // Independent of any chat turn, so the reader can audit what the engine was
+  // fed long after the turn that fed it.
+  if (req.method === "GET" && req.url.startsWith("/api/web-history")) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ count: webHistory.length, entries: webHistory }));
+    return;
+  }
+
+  // The reading fold for one ingested source: its cast (referents typed
+  // holon/emanon/protogon/field/apparatus), its divisions, and how much of the
+  // file was folded at all. This is what eochat's buildEntityMatcher — a regex
+  // over capitalized words, top-20 by frequency — is meant to be replaced by.
+  //
+  // Anything the engine cannot supply arrives as a typed gap in `gaps`, and a
+  // referent no per-text prior has individuated arrives in `withheld` with
+  // `aliasesResolved: false` rather than in `referents` under a guessed label.
+  // A client that renders `referents` therefore cannot show a fabricated cast;
+  // one that wants the withheld candidates must ask for them by name.
+  if (req.method === "GET" && req.url.startsWith("/api/fold")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const source = url.searchParams.get("source");
+    if (!source) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing 'source' parameter" }));
+      return;
+    }
+    try {
+      // `z` tunes how readily the novelty curve calls a boundary. It is handed
+      // straight to detectBoundaries rather than post-filtered here, so a finer
+      // read is the engine's reading at another sensitivity — not this endpoint
+      // second-guessing the one it got.
+      const z = url.searchParams.has("z") ? Number(url.searchParams.get("z")) : undefined;
+      const result = engineFoldSource(source, {
+        pool: url.searchParams.get("pool") || undefined,
+        limit: parseInt(url.searchParams.get("limit") || "40", 10),
+        anchors: parseInt(url.searchParams.get("anchors") || "3", 10),
+        zThreshold: Number.isFinite(z) ? z : undefined,
+      });
+      // An unresolvable source is a 404, not a 200 carrying an error body — a
+      // client polling this must be able to tell "no such source" from "a fold
+      // with nothing in it", and those mean very different things here.
+      res.writeHead(result.error ? 404 : 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // Read a byte range of an ingested source. The reader's body text for corpus
+  // sources: /api/attachments/content only knows session uploads, and the books
+  // ingested at startup are not uploads. Byte ranges are the same coordinates
+  // /api/fold's divisions carry, so paging by division needs no translation.
+  if (req.method === "GET" && req.url.startsWith("/api/source/text")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const source = url.searchParams.get("source");
+    if (!source) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing 'source' parameter" }));
+      return;
+    }
+    try {
+      const num = (name) => {
+        const raw = url.searchParams.get(name);
+        if (raw == null || raw === "") return null;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : null;
+      };
+      const result = engineReadSourceBytes(source, {
+        pool: url.searchParams.get("pool") || undefined,
+        start: num("start") ?? 0,
+        end: num("end"),
+        maxBytes: num("max") ?? undefined,
+      });
+      // Same 404-vs-200 split as /api/fold: "no such source" and "a source with
+      // nothing at that offset" are different answers and the client acts on
+      // them differently.
+      res.writeHead(result.error ? 404 : 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // Priors — eoPriors artifacts as a browsable, searchable source.
+  // Separate pool: these are never returned by corpus grounding.
+  // ══════════════════════════════════════════════════════════════
+  if (req.method === "GET" && req.url.startsWith("/api/priors")) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    try {
+      const priors = priorsSource;
+
+      if (url.pathname === "/api/priors/read") {
+        const id = url.searchParams.get("id");
+        if (!id) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing 'id' parameter" }));
+          return;
+        }
+        const result = priors.readPrior(id, {
+          layer: url.searchParams.get("layer") === "raw" ? "raw" : "card",
+          byteStart: parseInt(url.searchParams.get("start") || "0", 10),
+          maxBytes: parseInt(url.searchParams.get("max") || "40000", 10),
+        });
+        res.writeHead(result.error ? 404 : 200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      if (url.pathname === "/api/priors/search") {
+        const q = url.searchParams.get("q");
+        if (!q) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing 'q' parameter" }));
+          return;
+        }
+        const result = priors.searchPriors(q, parseInt(url.searchParams.get("limit") || "8", 10), {
+          maxChars: parseInt(url.searchParams.get("max_chars") || "900", 10),
+          prior: url.searchParams.get("prior") || undefined,
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      // Catalog. Entries carry metadata only (size, family, scope, key names);
+      // the parsed artifacts are never retained, so this stays small.
+      const state = priors.ensurePriorsIngested();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        pool: state.pool,
+        count: state.priors,
+        gaps: state.gaps,
+        priors: priors.priorsCatalog(),
+      }));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // Structural outline of a document, for the reader's section navigation.
+  //
+  // POST rather than GET, and it takes the text itself, because the reader's
+  // content arrives from three different places — session attachments, prior
+  // artifacts, client-side blobs from an upload the engine never saw — and an
+  // outline that only worked for one of them would quietly leave the other two
+  // rendering as a single unnavigable blob. The caller already holds the exact
+  // string it is about to slice, so sending it back is what makes the returned
+  // offsets provably in the same coordinate system as the reader's own text.
+  //
+  // `{ name, session }` is the fallback when the caller has a name but no text.
+  if (req.method === "POST" && req.url === "/api/verbatim/outline") {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", async () => {
+      try {
+        const { text, name, session, source: sourceRef, pool } = JSON.parse(body || "{}");
+        // An ingested corpus source resolves through the engine and comes back
+        // byte-addressed, which is what the reader pages with. Attachments and
+        // raw text keep the code-unit-only path — they have no file behind them.
+        if (sourceRef) {
+          const result = engineOutlineOfSource(sourceRef, { pool: pool || undefined });
+          res.writeHead(result.error ? 404 : 200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+          return;
+        }
+        let content = typeof text === "string" ? text : null;
+        if (content == null && name) {
+          content = await discourse.getAttachmentContent(session || "default", name);
+        }
+        if (content == null) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Provide 'source' (ingested), 'text', or a 'name' that resolves to an attachment" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(outlineOfText(content)));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
     return;
   }
 
@@ -2363,11 +3132,14 @@ const server = http.createServer((req, res) => {
 
     // Read a specific span by ID
     if (url.pathname === "/api/verbatim/read") {
-      const spanId = url.searchParams.get("id");
+      // UX-DESIGN.md documents this as `span_id`; the implementation only ever
+      // read `id`, so every caller written against the doc got a 400. Accept
+      // both — the documented name is not the wrong name.
+      const spanId = url.searchParams.get("id") || url.searchParams.get("span_id");
       const maxBytes = parseInt(url.searchParams.get("max") || "4000", 10);
       if (!spanId) {
         res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing 'id' parameter" }));
+        res.end(JSON.stringify({ error: "Missing 'id' (or 'span_id') parameter" }));
         return;
       }
       try {
@@ -2427,16 +3199,25 @@ const server = http.createServer((req, res) => {
     let query = url.searchParams.get("q");
     const limit = parseInt(url.searchParams.get("limit") || "10", 10);
     const maxChars = parseInt(url.searchParams.get("max_chars") || "800", 10);
-    const source = url.searchParams.get("source") || null;
+    let source = url.searchParams.get("source") || null;
     if (!query) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Missing 'q' parameter" }));
       return;
     }
+    // `source=priors` selects the priors POOL rather than filtering the corpus
+    // pool by filename — asking for priors is a different question, not a
+    // narrower one. `source=priors:lens-fold` narrows within that pool.
+    let searchPool = undefined;
+    if (source === "priors" || source?.startsWith("priors:")) {
+      priorsSource.ensurePriorsIngested();
+      searchPool = priorsSource.PRIORS_POOL;
+      source = source.startsWith("priors:") ? source.slice("priors:".length) : null;
+    }
     try {
       // Try the query as-is first (the engine's dense retrieval may find
       // semantically related passages even with diacritic differences)
-      let result = engineSearch(query, Math.min(limit, 40), { maxChars, source });
+      let result = engineSearch(query, Math.min(limit, 40), { maxChars, source, pool: searchPool });
 
       // If the query returned gaps (no_evidence_matched) and the query has
       // diacritics or the query might differ from stored text's diacritics,
@@ -2447,7 +3228,7 @@ const server = http.createServer((req, res) => {
       if (result.passages.length === 0) {
         const stripped = query.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
         if (stripped !== query) {
-          result = engineSearch(stripped, Math.min(limit, 40), { maxChars, source });
+          result = engineSearch(stripped, Math.min(limit, 40), { maxChars, source, pool: searchPool });
           if (result.passages.length > 0) {
             result.diacritic_fallback = true;
             result.diacritic_query = stripped;
@@ -2457,6 +3238,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         query,
+        pool: result.pool,
         total: result.total,
         passages: result.passages,
         gaps: result.gaps,
@@ -2488,7 +3270,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Streaming tool-calling endpoint (with optional engine grounding)
+  // Streaming tool-calling endpoint (always engine-grounded — not a client toggle)
   if (req.method === "POST" && req.url === "/api/chat/tools") {
     let body = "";
     let bodySize = 0;
@@ -2530,12 +3312,11 @@ const server = http.createServer((req, res) => {
         }
 
         await handleToolStream(res, messages, tools, data.model || null, {
-          grounded: !!data.grounded,
           webSearch: data.webSearch !== false,
           session: sessionId,
-          groundBudget: data.groundBudget ?? 600,
-          groundMaxUnits: data.groundMaxUnits ?? 8,
-          groundLimit: data.groundLimit ?? 15,
+          groundBudget: data.groundBudget ?? 2400,
+          groundMaxUnits: data.groundMaxUnits ?? 16,
+          groundLimit: data.groundLimit ?? 30,
           groundSource: data.groundSource || null,
         });
       } catch (err) {
@@ -2544,6 +3325,74 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ error: err.message }));
         }
       }
+    });
+    return;
+  }
+
+  // Dedicated holonic-task generation endpoint (the Compose UI surface) —
+  // always runs holonic_task directly rather than routing through the LLM's
+  // own tool-choice, since this is a deliberate, distinct action, not an
+  // ambient chat capability. Streams the same holonic_* SSE events the
+  // LLM-callable tool emits via onEvent.
+  if (req.method === "POST" && req.url === "/api/holonic") {
+    let body = "";
+    let bodySize = 0;
+    req.on("data", chunk => {
+      bodySize += chunk.length;
+      if (bodySize > MAX_BODY) { req.destroy(new Error("Request body too large")); return; }
+      body += chunk.toString("utf8");
+    });
+    req.on("end", async () => {
+      let data;
+      try {
+        data = JSON.parse(body);
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `Invalid JSON: ${err.message}` }));
+        return;
+      }
+
+      const taskDescription = data.task || "";
+      if (!taskDescription) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "'task' is required" }));
+        return;
+      }
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      const sendSSE = (event, payload) => {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+      };
+
+      const task = new HolonicTask({
+        task: taskDescription,
+        model: data.model || "gemma2:2b",
+        engine: buildHolonicEngineAdapter(),
+        outputPath: data.output_path || null,
+      });
+
+      try {
+        const result = await task.run({
+          onProgress: (phase, msg, progressData = {}) => sendSSE(`holonic_${phase}`, { msg, ...progressData }),
+        });
+        sendSSE("done", {
+          sections: result.results.length,
+          chars: result.output.length,
+          mechanicalCitations: result.results.reduce((a, r) => a + r.citations.length, 0),
+          gaps: result.gaps.length,
+          replanHistory: result.replanHistory,
+          output: result.output,
+          results: result.results,
+        });
+      } catch (err) {
+        sendSSE("error", { message: err.message });
+      }
+      res.end();
     });
     return;
   }
@@ -2577,22 +3426,52 @@ const server = http.createServer((req, res) => {
 
       try {
         if (useToolLoop) {
-          // Non-streaming tool loop
-          const result = await runToolLoop(
-            data.messages || [],
-            tools || TOOL_DEFINITIONS
-          );
+          // Non-streaming tool loop — same grounding contract as the SSE
+          // surface: ground the question first, run the loop, then void any
+          // answer that never cited the reader's sources.
+          const messages = data.messages || [];
+          const lastUser = [...messages].reverse().find((m) => m.role === "user");
+          const query = lastUser ? (lastUser.content || "") : null;
+          let maxCitation = 0;
+          if (query) {
+            const groundResult = engineGroundQuery(query, {
+              budget: DEFAULT_GROUND_BUDGET,
+              maxUnits: 16,
+              limit: 30,
+            });
+    const built = buildGroundedSystemMessage(groundResult, query, corpusWarmup.started && !corpusWarmup.ready);
+            maxCitation = built.message._citationCount;
+            const userIdx = messages.findIndex((m) => m.role === "user" && m.content === query);
+            if (userIdx >= 0) messages.splice(userIdx, 0, built.message);
+            else messages.unshift(built.message);
+          }
+
+          const result = await runToolLoop(messages, tools || TOOL_DEFINITIONS);
+
+          let content = maxCitation > 0 ? validateCitations(result, maxCitation) : result;
+          let voided = false;
+          let voidReason = null;
+          if (maxCitation === 0) {
+            voided = true;
+            voidReason = "No passage in your sources matched this question — the answer could not be grounded and was not served.";
+            content = null;
+          } else if (citedNumbers(content, maxCitation).length === 0) {
+            voided = true;
+            voidReason = `The model cited none of the ${maxCitation} retrieved passage(s) — its answer came from its own knowledge and was voided rather than served.`;
+            content = null;
+          }
+          if (voided) content = voidedAnswer(voidReason);
 
           // Persist to discourse store
-          for (const m of data.messages || []) {
+          for (const m of messages) {
             if (m.content?.length > 5 && m.role === "user") {
               await discourse.addMessage(sessionId, m.role, m.content);
               store.ingest(m.content, m.role, { session: sessionId });
             }
           }
-          if (result?.length > 5) {
-            await discourse.addMessage(sessionId, "assistant", result);
-            store.ingest(result, "assistant", { session: sessionId });
+          if (!voided && content?.length > 5) {
+            await discourse.addMessage(sessionId, "assistant", content);
+            store.ingest(content, "assistant", { session: sessionId });
           }
 
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -2603,7 +3482,7 @@ const server = http.createServer((req, res) => {
             model: data.model || "llama3.2",
             choices: [{
               index: 0,
-              message: { role: "assistant", content: result },
+              message: { role: "assistant", content },
               finish_reason: "stop",
             }],
           }));
@@ -2780,7 +3659,15 @@ async function start() {
   // Ensure memory dir
   try { await fsp.mkdir(MEMORY_DIR, { recursive: true }); } catch {}
 
-  // Load code (async, error-isolated)
+  // Start server FIRST so it accepts connections immediately
+  server.listen(PORT, () => {
+    console.error(`[proxy] Ready on port ${PORT} (target: ${TARGET}, store: ${store.size}/${STORE_MAX})`);
+    console.error(`[proxy] Tool calling: ${Object.keys(toolHandlers).length} tools loaded`);
+    // Print ready message on stdout for consumers
+    process.stdout.write(`EO_PROXY_READY:${PORT}\n`);
+  });
+
+  // Load code (async, error-isolated) — happens AFTER server starts
   try {
     await loadCode(REPO_PATH);
   } catch (err) {
@@ -2796,58 +3683,92 @@ async function start() {
     });
   });
 
-  // Auto-ingest War and Peace (pg2600.txt) for verbatim span retrieval
-  const WAR_AND_PEACE_PATHS = [
-    path.resolve(REPO_PATH, "pg2600.txt"),
-    path.resolve(REPO_PATH, "..", "pg2600.txt"),
-    path.resolve(process.env.HOME || "/Users/mlacy", "Downloads", "pg2600.txt"),
-    path.resolve(process.env.HOME || "/Users/mlacy", "Desktop", "pg2600.txt"),
-  ];
-  for (const wpPath of WAR_AND_PEACE_PATHS) {
-    try {
-      if (fs.existsSync(wpPath)) {
-        const wpResult = engineIngestFile(wpPath);
-        console.error(`[proxy] Ingested War and Peace: ${wpPath} (${wpResult.chunks} chunks)`);
-        break;
+  // Auto-ingest large files AFTER server is listening (non-blocking)
+  // These run in the background and don't prevent the server from accepting requests
+  setImmediate(async () => {
+    corpusWarmup.started = true;
+    // Auto-ingest War and Peace (pg2600.txt) for verbatim span retrieval
+    const WAR_AND_PEACE_PATHS = [
+      path.resolve(REPO_PATH, "pg2600.txt"),
+      path.resolve(REPO_PATH, "..", "pg2600.txt"),
+      path.resolve(process.env.HOME || "/Users/mlacy", "Downloads", "pg2600.txt"),
+      path.resolve(process.env.HOME || "/Users/mlacy", "Desktop", "pg2600.txt"),
+    ];
+    for (const wpPath of WAR_AND_PEACE_PATHS) {
+      try {
+        if (fs.existsSync(wpPath)) {
+          const wpResult = engineIngestFile(wpPath);
+          console.error(`[proxy] Ingested War and Peace: ${wpPath} (${wpResult.chunks} chunks)`);
+          break;
+        }
+      } catch (err) {
+        if (!err.message?.includes("duplicate")) {
+          console.error(`[proxy] War and Peace ingest skipped at ${wpPath}: ${err.message}`);
+        }
       }
-    } catch (err) {
-      console.error(`[proxy] War and Peace ingest skipped at ${wpPath}: ${err.message}`);
     }
-  }
 
-  // Also look for Frankenstein (pg84.txt) in the repo dir
-  const FRANKENSTEIN_PATHS = [
-    path.resolve(REPO_PATH, "pg84.txt"),
-    path.resolve(REPO_PATH, "..", "pg84.txt"),
-    path.resolve(process.env.HOME || "/Users/mlacy", "Downloads", "pg84.txt"),
-  ];
-  for (const frPath of FRANKENSTEIN_PATHS) {
-    try {
-      if (fs.existsSync(frPath)) {
-        const frResult = engineIngestFile(frPath);
-        console.error(`[proxy] Ingested Frankenstein: ${frPath} (${frResult.chunks} chunks)`);
-        break;
+    // Also look for Frankenstein (pg84.txt) in the repo dir
+    const FRANKENSTEIN_PATHS = [
+      path.resolve(REPO_PATH, "pg84.txt"),
+      path.resolve(REPO_PATH, "..", "pg84.txt"),
+      path.resolve(process.env.HOME || "/Users/mlacy", "Downloads", "pg84.txt"),
+    ];
+    for (const frPath of FRANKENSTEIN_PATHS) {
+      try {
+        if (fs.existsSync(frPath)) {
+          const frResult = engineIngestFile(frPath);
+          console.error(`[proxy] Ingested Frankenstein: ${frPath} (${frResult.chunks} chunks)`);
+          break;
+        }
+      } catch (err) {
+        if (!err.message?.includes("duplicate")) {
+          console.error(`[proxy] Frankenstein ingest skipped at ${frPath}: ${err.message}`);
+        }
       }
-    } catch (err) {
-      console.error(`[proxy] Frankenstein ingest skipped at ${frPath}: ${err.message}`);
     }
-  }
 
-  // Verify upstream is reachable
-  try {
-    await safeFetch(`${TARGET}/api/tags`, {}, 5000);
-    console.error(`[proxy] Ollama reachable at ${TARGET}`);
-  } catch (err) {
-    console.error(`[proxy] Warning: Ollama not reachable at ${TARGET}: ${err.message}`);
-    console.error(`[proxy] The proxy will start but upstream calls will fail until Ollama is available.`);
-  }
+    // Also look for the King James Bible (pg10.txt)
+    const BIBLE_PATHS = [
+      path.resolve(REPO_PATH, "pg10.txt"),
+      path.resolve(REPO_PATH, "..", "pg10.txt"),
+      path.resolve(process.env.HOME || "/Users/mlacy", "Downloads", "pg10.txt"),
+    ];
+    for (const bibPath of BIBLE_PATHS) {
+      try {
+        if (fs.existsSync(bibPath)) {
+          const bibResult = engineIngestFile(bibPath);
+          console.error(`[proxy] Ingested King James Bible: ${bibPath} (${bibResult.chunks} chunks)`);
+          break;
+        }
+      } catch (err) {
+        if (!err.message?.includes("duplicate")) {
+          console.error(`[proxy] Bible ingest skipped at ${bibPath}: ${err.message}`);
+        }
+      }
+    }
 
-  server.listen(PORT, () => {
-    console.error(`[proxy] Ready on port ${PORT} (target: ${TARGET}, store: ${store.size}/${STORE_MAX})`);
-    console.error(`[proxy] Tool calling: ${Object.keys(toolHandlers).length} tools loaded`);
-    // Print ready message on stdout for consumers
-    process.stdout.write(`EO_PROXY_READY:${PORT}\n`);
+    corpusWarmup.ready = true;
+    console.error(`[proxy] Corpus warm — grounding is now complete`);
   });
+
+  // Verify upstream is reachable — retry with backoff because the
+  // concurrent engine ingest of large texts (War and Peace, Bible) may
+  // temporarily make Ollama unresponsive during embedding.
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const ok = await safeFetch(`${TARGET}/api/tags`, {}, attempt < 4 ? 5000 : 10000).then(r => true).catch(() => false);
+    if (ok) {
+      console.error(`[proxy] Ollama reachable at ${TARGET}`);
+      break;
+    }
+    if (attempt < 4) {
+      console.error(`[proxy] Waiting for Ollama (attempt ${attempt}/4)...`);
+      await new Promise(r => setTimeout(r, 3000 * attempt));
+    } else {
+      console.error(`[proxy] Warning: Ollama not reachable at ${TARGET} after 4 attempts`);
+      console.error(`[proxy] The proxy will start but upstream calls will fail until Ollama is available.`);
+    }
+  }
 }
 
 start().catch(err => {

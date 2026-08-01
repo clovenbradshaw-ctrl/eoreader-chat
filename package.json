@@ -17,9 +17,9 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@eoreader/engine": "file:../eoreader5/packages/engine",
-    "@eoreader/host": "file:../eoreader5/packages/host",
-    "@eoreader/spec": "file:../eoreader5/packages/spec",
+    "@eoreader/engine": "file:../eoreader6/packages/engine",
+    "@eoreader/host": "file:../eoreader6/packages/host",
+    "@eoreader/spec": "file:../eoreader6/packages/spec",
     "glob": "^13.0.6"
   }
 }

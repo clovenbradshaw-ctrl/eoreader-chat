@@ -112,7 +112,13 @@ export function createModelRouter({
   warmupPerCandidate = 3,
   temperature = 1,
   epsilon = 0.05,
-  population = "eoreader-chat:tool-loop-v1",
+  // v2: "success" now requires the turn to also finish inside the caller's
+  // latency budget (see proxy.js LATENCY_BUDGET_MS). v1 entries recorded a
+  // 256-second reply as an unqualified success — a different, no-longer-
+  // comparable definition of the outcome — so this bump changes task.id and
+  // `load()`'s existing "different task_id ⇒ skip" rule excludes them
+  // automatically, rather than silently blending two definitions of success.
+  population = "eoreader-chat:tool-loop-v2",
 } = {}) {
   if (!Array.isArray(candidates) || candidates.length < 2) {
     throw new TypeError("createModelRouter: candidates must list at least 2 model ids");
@@ -216,7 +222,27 @@ export function createModelRouter({
     const { belowWarmup, weights } = routingSignal();
     let chosen;
     if (belowWarmup) {
-      chosen = heuristicFallback(messages);
+      // Warmup needs `warmupPerCandidate` real trials of EVERY candidate before
+      // the learned router may activate. Deferring blindly to heuristicFallback
+      // does not guarantee that: measured here, selectModel() sends any message
+      // over ~200 chars to MEDIUM_MODEL, and eochat wraps every real question
+      // with a source list that always crosses that threshold — so the tiny
+      // candidate received zero attempts, ever, and warmup never ended.
+      //
+      // "Only override the heuristic once its choice has already cleared
+      // warmup" is not enough — a first measured version of this fix still
+      // deferred to the heuristic on every tied start (all candidates at 0
+      // attempts are simultaneously "still under warmup"), so it just replayed
+      // the same bias turn after turn. Forcing the STRICTLY least-attempted
+      // candidate breaks ties toward the heuristic's own pick but guarantees
+      // the gap can never widen: the moment one candidate pulls ahead, the
+      // next warmup turn is forced to the other, producing a fair alternation
+      // that completes in at most warmupPerCandidate * candidates.length turns
+      // regardless of what the heuristic would otherwise always pick.
+      const minAttempts = Math.min(...candidates.map((id) => stats.get(id).attempts));
+      const leastExplored = candidates.filter((id) => stats.get(id).attempts === minAttempts);
+      const heuristicChoice = heuristicFallback(messages);
+      chosen = leastExplored.includes(heuristicChoice) ? heuristicChoice : leastExplored[0];
       if (!candidates.includes(chosen)) {
         console.error(`[model-router] heuristic returned unknown candidate ${JSON.stringify(chosen)}; falling back to ${candidates[0]}`);
         chosen = candidates[0];

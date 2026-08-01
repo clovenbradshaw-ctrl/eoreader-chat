@@ -94,7 +94,7 @@ const ENTITY_NAMES = new Map([
 ]);
 
 const REPO_DESCRIPTIONS = {
-  "eoreader5": "Current semantic engine — all organs (cube, presence, fold, store, discourse, spine, reaction) and the multi-altitude entity summary oracle",
+  "eoreader5": "Current semantic engine — all organs (cube, presence, fold, store, discourse, spine, reaction) and the multi-altitude entity summary assay",
   "eoPriors": "Priors: corpus prior cube, per-text coref alias/narrator knowledge, injected as witness-tier priors",
   "eoreader4.2": "Legacy engine — src/weave/write/ has the unported phraser→talker prose pipeline",
   "eoreader-chat": "Chat interface and proxy — connects users/LLMs to the eoreader5 engine via MCP tools and a BoundedStore memory layer",

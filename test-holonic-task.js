@@ -106,6 +106,32 @@ class MockEngine {
   }
 }
 
+// ── Mock model: deliberately low-grounding first draft, corrects on retry ──
+//
+// This exercises the real correction loop in HolonicTask.executeSubtask()
+// end-to-end without needing Ollama: the first draft ignores the source
+// passages (low grounding, forces a correction pass); subsequent drafts echo
+// the passages the correction prompt flagged as missing (grounding should
+// clear the threshold and the loop should stop).
+
+function makeMockModelCall() {
+  return async function mockCall(messages) {
+    const userMsg = messages.find(m => m.role === "user")?.content || "";
+    const isCorrection = userMsg.includes("Here is your previous draft");
+    if (!isCorrection) {
+      return "This section touches on broadly relevant ideas in a general way, without citing anything specific from any particular source.";
+    }
+    // Only the "Incorporate it" section holds actual source passages — the
+    // block before it is the (deliberately ungrounded) previous draft, which
+    // must NOT be echoed back or the mock would never converge.
+    const afterMarker = userMsg.split("Incorporate it:")[1] || "";
+    const passageBlocks = [...afterMarker.matchAll(/---\n([\s\S]*?)\n---/g)].map(m => m[1]).filter(Boolean);
+    return passageBlocks.length > 0
+      ? passageBlocks.slice(0, 3).join(" ")
+      : "Revised section incorporating the source material more closely.";
+  };
+}
+
 // ── CLI ──
 
 function parseArgs() {
@@ -128,6 +154,7 @@ function parseArgs() {
     model: flags.model || "gemma2:2b",
     output: flags.output || path.join(PROJECT_ROOT, "holonic-task-output.md"),
     mockOnly: flags["mock-only"] || false,
+    tree: flags.tree || false,
     sourceFile: flags.source || path.join(PROJECT_ROOT, "pg84.txt"),
   };
 }
@@ -147,6 +174,176 @@ function fallbackPlan(task) {
   };
 }
 
+// ── Tree test (mock model, 2-level tree) ──
+//
+// Builds a small holonic tree manually and exercises recursive execution
+// (branch synthesis + leaf execution) with the mock correction loop.
+// Verifies that surplus scoring fires on cross-passage synthesis and
+// that branch nodes correctly synthesize their children.
+
+async function runTreeTest(config) {
+  const { HolonNode } = await import("./holonic-task.js");
+
+  // Seed a mock engine so researchSubtask returns surf passages
+  const engine = new MockEngine();
+
+  const holonic = new HolonicTask({
+    task: config.task,
+    model: config.model,
+    engine: config.mockOnly ? engine : null,
+    outputPath: null,
+    surplusThreshold: 0.01,
+    maxDepth: 2,
+  });
+  holonic._call = makeMockModelCall();
+
+  // Fallback surf so every leaf gets at least 2 passages (surplus needs ≥2)
+  const origResearch = holonic.researchSubtask.bind(holonic);
+  holonic.researchSubtask = async (st) => {
+    const r = await origResearch(st);
+    if (r.surf.length === 0) {
+      r.surf = [
+        { text: `Detailed source material about ${st.label}: covering specific facts and terminology relevant to this aspect.`, source: "mock", score: 1, spanId: null, byteStart: null, byteEnd: null },
+        { text: `Additional context about ${st.label}: supporting details and broader background information.`, source: "mock", score: 0.8, spanId: null, byteStart: null, byteEnd: null },
+      ];
+    }
+    return r;
+  };
+
+  // Build a 2-level tree manually
+  const root = new HolonNode({
+    id: "root", label: "Sea Turtles", description: config.task, type: "root", level: 0,
+  });
+  root.isLeaf = false;
+
+  const intro = new HolonNode({
+    id: "intro", label: "Introduction", description: "Introduce sea turtles", type: "introduction", level: 1, parent: root,
+  });
+  const biology = new HolonNode({
+    id: "biology", label: "Biology", description: "Sea turtle biology and anatomy", type: "section", level: 1, parent: root,
+  });
+  biology.isLeaf = false;
+
+  const anatomy = new HolonNode({
+    id: "anatomy", label: "Anatomy", description: "Physical anatomy of sea turtles", type: "section", level: 2, parent: biology,
+  });
+  const lifecycle = new HolonNode({
+    id: "lifecycle", label: "Lifecycle", description: "Sea turtle reproduction and lifecycle", type: "section", level: 2, parent: biology,
+  });
+  const conservation = new HolonNode({
+    id: "conservation", label: "Conservation", description: "Threats and conservation", type: "section", level: 1, parent: root,
+  });
+
+  root.children = [intro, biology, conservation];
+  biology.children = [anatomy, lifecycle];
+  holonic.treeRoot = root;
+
+  console.log("Tree structure:");
+  console.log("  root");
+  console.log("    ├── intro (leaf)");
+  console.log("    ├── biology (branch)");
+  console.log("    │   ├── anatomy (leaf)");
+  console.log("    │   └── lifecycle (leaf)");
+  console.log("    └── conservation (leaf)");
+  console.log("");
+
+  // Execute tree
+  console.log("─── Phase 2: Tree Execution ───");
+  let draft = "";
+  for (const child of root.children) {
+    console.log(`\nExecuting: ${child.label}`);
+    const result = await holonic._executeNode(child, { draft });
+    draft += `\n\n${child.headingMarker} ${child.label}\n\n${result.content}`;
+    const trail = result.iterations
+      ? result.iterations.map(it => `g=${it.groundingScore.toFixed(2)} s=${(it.surplusScore ?? 0).toFixed(2)}`).join(" → ")
+      : "synthesis";
+    console.log(`  ${trail}`);
+  }
+
+  // Assemble tree
+  console.log("\n─── Phase 3: Tree Assembly ───");
+  const output = await holonic.assembleTree();
+  console.log(`Output: ${output.length} chars`);
+
+  // Results
+  console.log("\n─── Results ───");
+  const leaves = root.leaves;
+  console.log(`Leaves: ${leaves.length}`);
+  console.log(`Depth: ${Math.max(...leaves.map(l => l.level), 0) + 1} levels`);
+  for (const leaf of leaves) {
+    if (leaf.result) {
+      console.log(`  ${leaf.label} (${leaf.path}): g=${leaf.groundingScore.toFixed(3)} s=${(leaf.surplusScore ?? 0).toFixed(3)} ${leaf.result.iterations.length} iters`);
+    }
+  }
+  for (const child of root.children) {
+    if (!child.isLeaf && child.result) {
+      console.log(`  ${child.label} (branch): g=${child.groundingScore.toFixed(3)} s=${(child.surplusScore ?? 0).toFixed(3)}`);
+    }
+  }
+
+  // Verify surplus is being computed for leaf nodes with multiple surf passages
+  const leafWithMultipleSurf = leaves.find(l => l.result && l.result.surf && l.result.surf.length > 1);
+  if (leafWithMultipleSurf) {
+    console.log(`\n  Surplus test: ${leafWithMultipleSurf.label} had ${leafWithMultipleSurf.result.surf.length} surf passages, surplus=${leafWithMultipleSurf.surplusScore.toFixed(3)}`);
+  }
+
+  console.log("\n=== Tree Test Complete ===");
+
+  // Clean up test output
+  try { fs.unlinkSync(config.output); } catch {}
+}
+
+// ── Live tree test (uses runTree with learning phase, real model) ──
+
+async function runTreeLive(config) {
+  const engine = new MockEngine();
+  if (config.sourceFile && fs.existsSync(config.sourceFile)) {
+    console.error(`Ingesting source: ${config.sourceFile}`);
+    engine.ingestFile(config.sourceFile);
+  }
+
+  const holonic = new HolonicTask({
+    task: config.task,
+    model: config.model,
+    engine,
+    outputPath: config.output,
+    surplusThreshold: 0.01,
+    maxDepth: 2,
+  });
+
+  const result = await holonic.runTree({ onProgress: (phase, msg) => console.error(`[${phase}] ${msg}`) });
+
+  // Print summary
+  console.log("");
+  console.log("─── Results ───");
+  console.log(`Task:     ${config.task}`);
+  const leaves = holonic.treeRoot.leaves.length;
+  const depth = Math.max(...holonic.treeRoot.leaves.map(l => l.level), 0) + 1;
+  console.log(`Leaves:   ${leaves} across ${depth} levels`);
+  console.log(`Output:   ${result.output.length} chars`);
+  console.log(`Plan time:    ${(holonic.metrics.planTime / 1000).toFixed(1)}s`);
+  console.log(`Learn time:   ${(holonic.metrics.learnTime / 1000).toFixed(1)}s`);
+  console.log(`Execute time: ${(holonic.metrics.executeTime / 1000).toFixed(1)}s`);
+
+  // Score summary
+  console.log("");
+  console.log("─── Leaf Scores ───");
+  for (const leaf of holonic.treeRoot.leaves) {
+    if (leaf.result) {
+      const trail = leaf.result.iterations.map(it => `g=${it.groundingScore.toFixed(2)} s=${(it.surplusScore ?? 0).toFixed(2)}`).join(" → ");
+      console.log(`  ${leaf.path}: ${trail} (${leaf.result.iterations.length} iters)`);
+    }
+  }
+
+  // Output preview
+  console.log("");
+  console.log("─── Output Preview (first 30 lines) ───");
+  const previewLines = result.output.split("\n").slice(0, 30);
+  for (const line of previewLines) console.log(line);
+
+  console.log("\n=== Tree Live Test Complete ===");
+}
+
 // ── Main ──
 
 async function runTest() {
@@ -160,7 +357,16 @@ async function runTest() {
   console.log(`Model:  ${config.model}`);
   console.log(`Output: ${config.output}`);
   if (config.mockOnly) console.log("Mode:   MOCK ONLY (no Ollama calls)");
+  if (config.tree) console.log("Mode:   TREE TEST (2-level holonic tree)");
   console.log("");
+
+  if (config.tree && config.mockOnly) {
+    return runTreeTest(config);
+  }
+
+  if (config.tree && !config.mockOnly) {
+    return runTreeLive(config);
+  }
 
   // Set up engine
   const engine = new MockEngine();
@@ -186,14 +392,27 @@ async function runTest() {
   if (config.mockOnly) {
     planData = fallbackPlan(config.task);
     holonic.planResult = planData;
-    holonic.subTaskResults = planData.subTasks.map(st => ({
-      id: st.id,
-      label: st.label,
-      content: `[MOCK] ${st.label} — content would be generated here by the model.`,
-      surf: [],
-      priors: [],
-      citations: [],
-    }));
+    holonic._call = makeMockModelCall();
+
+    console.log("");
+    console.log("─── Phase 2: Execution (mock model, real correction loop) ───");
+    holonic.subTaskResults = [];
+    let draft = "";
+    for (const st of planData.subTasks) {
+      const surf = [{
+        text: `Detailed source material about ${st.label.toLowerCase()}, covering specific facts, terminology, and examples relevant to this section of the document.`,
+        source: "mock",
+        score: 1,
+        spanId: null,
+        byteStart: null,
+        byteEnd: null,
+      }];
+      const result = await holonic.executeSubtask(st, { surf, priors: [], previousSections: draft });
+      holonic.subTaskResults.push(result);
+      draft += `\n\n## ${result.label}\n\n${result.content}`;
+      const trail = result.iterations.map(it => it.groundingScore.toFixed(2)).join(" → ");
+      console.log(`  ${st.label}: grounding ${trail} (${result.iterations.length} iteration${result.iterations.length > 1 ? "s" : ""})`);
+    }
   } else {
     // Phase 1: Plan
     console.log("");
@@ -238,8 +457,8 @@ async function runTest() {
       holonic.subTaskResults.push(result);
       draft += `\n\n## ${result.label}\n\n${result.content}`;
 
-      const elapsed = ((Date.now() - i * 1000) / 1000).toFixed(1);
-      console.log(`  Done: ${result.content.length} chars, ${result.citations.length} mechanical citations`);
+      const trail = result.iterations.map(it => it.groundingScore.toFixed(2)).join(" → ");
+      console.log(`  Done: ${result.content.length} chars, ${result.citations.length} mechanical citations, grounding ${trail} (${result.iterations.length} iteration${result.iterations.length > 1 ? "s" : ""})`);
       if (result.citations.length > 0) {
         for (const c of result.citations.slice(0, 3)) {
           const s = result.surf[c.surfIndex];
@@ -278,7 +497,8 @@ async function runTest() {
   console.log("");
   console.log("─── Provenance ───");
   for (const r of holonic.subTaskResults) {
-    console.log(`  ${r.label}: ${r.surf.length} surf passages, ${r.priors.length} priors, ${r.citations.length} mechanical citations`);
+    const trail = (r.iterations || []).map(it => it.groundingScore.toFixed(2)).join(" → ");
+    console.log(`  ${r.label}: ${r.surf.length} surf passages, ${r.priors.length} priors, ${r.citations.length} mechanical citations, grounding ${trail || "n/a"}`);
   }
 
   // Count total mechanical citations

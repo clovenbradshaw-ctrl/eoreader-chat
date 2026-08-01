@@ -1,0 +1,706 @@
+{
+  "startTime": 1785540947983,
+  "endTime": 1785540990871,
+  "duration": 42888,
+  "entries": [
+    {
+      "ts": 1785540947985,
+      "elapsed": 2,
+      "phase": "proxy_start",
+      "summary": "Starting proxy.js..."
+    },
+    {
+      "ts": 1785540948008,
+      "elapsed": 25,
+      "phase": "proxy_start",
+      "summary": "Proxy already running, reusing"
+    },
+    {
+      "ts": 1785540948008,
+      "elapsed": 25,
+      "phase": "phase",
+      "summary": "── Phase 1: Health & Stats ──"
+    },
+    {
+      "ts": 1785540948010,
+      "elapsed": 27,
+      "phase": "api_get",
+      "path": "/health",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 51,
+      "summary": "/health → 200 (51B, 2ms)"
+    },
+    {
+      "ts": 1785540948011,
+      "elapsed": 28,
+      "phase": "api_get",
+      "path": "/stats",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 74,
+      "summary": "/stats → 200 (74B, 1ms)"
+    },
+    {
+      "ts": 1785540948012,
+      "elapsed": 29,
+      "phase": "api_get",
+      "path": "/v1/models",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 54,
+      "summary": "/v1/models → 200 (54B, 1ms)"
+    },
+    {
+      "ts": 1785540948012,
+      "elapsed": 29,
+      "phase": "phase",
+      "summary": "── Phase 2: Document Import ──"
+    },
+    {
+      "ts": 1785540948012,
+      "elapsed": 29,
+      "phase": "import_start",
+      "label": "Frankenstein",
+      "path": "/Users/mlacy/Documents/Default Project/pg84.txt",
+      "sizeBytes": 448885,
+      "summary": "Importing Frankenstein (438KB)..."
+    },
+    {
+      "ts": 1785540948125,
+      "elapsed": 142,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 200,
+      "duration": 113,
+      "sizeBytes": 6932,
+      "requestSize": 58,
+      "summary": "POST /api/ingest → 200 (6932B, 113ms)"
+    },
+    {
+      "ts": 1785540948125,
+      "elapsed": 142,
+      "phase": "import_done",
+      "label": "Frankenstein",
+      "chunks": 224,
+      "pool": "corpus",
+      "duration": 113,
+      "summary": "Imported Frankenstein: 224 chunks in 113ms"
+    },
+    {
+      "ts": 1785540948126,
+      "elapsed": 143,
+      "phase": "import_start",
+      "label": "War and Peace",
+      "path": "/Users/mlacy/Downloads/pg2600.txt",
+      "sizeBytes": 3359610,
+      "summary": "Importing War and Peace (3281KB)..."
+    },
+    {
+      "ts": 1785540953429,
+      "elapsed": 5446,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 200,
+      "duration": 5303,
+      "sizeBytes": 51680,
+      "requestSize": 44,
+      "summary": "POST /api/ingest → 200 (51680B, 5303ms)"
+    },
+    {
+      "ts": 1785540953429,
+      "elapsed": 5446,
+      "phase": "import_done",
+      "label": "War and Peace",
+      "chunks": 1647,
+      "pool": "corpus",
+      "duration": 5304,
+      "summary": "Imported War and Peace: 1647 chunks in 5304ms"
+    },
+    {
+      "ts": 1785540953429,
+      "elapsed": 5446,
+      "phase": "import_start",
+      "label": "KJV Bible",
+      "path": "/Users/mlacy/Downloads/pg10.txt",
+      "sizeBytes": 4455950,
+      "summary": "Importing KJV Bible (4352KB)..."
+    },
+    {
+      "ts": 1785540962058,
+      "elapsed": 14075,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 200,
+      "duration": 8629,
+      "sizeBytes": 70206,
+      "requestSize": 42,
+      "summary": "POST /api/ingest → 200 (70206B, 8629ms)"
+    },
+    {
+      "ts": 1785540962058,
+      "elapsed": 14075,
+      "phase": "import_done",
+      "label": "KJV Bible",
+      "chunks": 2226,
+      "pool": "corpus",
+      "duration": 8629,
+      "summary": "Imported KJV Bible: 2226 chunks in 8629ms"
+    },
+    {
+      "ts": 1785540962059,
+      "elapsed": 14076,
+      "phase": "import_start",
+      "label": "Pride and Prejudice",
+      "path": "/Users/mlacy/Downloads/pg1342.txt",
+      "sizeBytes": 772386,
+      "summary": "Importing Pride and Prejudice (754KB)..."
+    },
+    {
+      "ts": 1785540962330,
+      "elapsed": 14347,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 200,
+      "duration": 271,
+      "sizeBytes": 11817,
+      "requestSize": 44,
+      "summary": "POST /api/ingest → 200 (11817B, 271ms)"
+    },
+    {
+      "ts": 1785540962330,
+      "elapsed": 14347,
+      "phase": "import_done",
+      "label": "Pride and Prejudice",
+      "chunks": 382,
+      "pool": "corpus",
+      "duration": 272,
+      "summary": "Imported Pride and Prejudice: 382 chunks in 272ms"
+    },
+    {
+      "ts": 1785540962330,
+      "elapsed": 14347,
+      "phase": "import_start",
+      "label": "Metamorphosis",
+      "path": "/Users/mlacy/Downloads/pg5200.txt",
+      "sizeBytes": 141933,
+      "summary": "Importing Metamorphosis (139KB)..."
+    },
+    {
+      "ts": 1785540962346,
+      "elapsed": 14363,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 200,
+      "duration": 16,
+      "sizeBytes": 2203,
+      "requestSize": 44,
+      "summary": "POST /api/ingest → 200 (2203B, 16ms)"
+    },
+    {
+      "ts": 1785540962347,
+      "elapsed": 14364,
+      "phase": "import_done",
+      "label": "Metamorphosis",
+      "chunks": 71,
+      "pool": "corpus",
+      "duration": 17,
+      "summary": "Imported Metamorphosis: 71 chunks in 17ms"
+    },
+    {
+      "ts": 1785540962347,
+      "elapsed": 14364,
+      "phase": "phase",
+      "summary": "── Phase 3: Engine State After Import ──"
+    },
+    {
+      "ts": 1785540962349,
+      "elapsed": 14366,
+      "phase": "api_get",
+      "path": "/api/grounded/stats",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 233,
+      "summary": "/api/grounded/stats → 200 (233B, 2ms)"
+    },
+    {
+      "ts": 1785540962351,
+      "elapsed": 14368,
+      "phase": "api_get",
+      "path": "/api/sources",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 695,
+      "summary": "/api/sources → 200 (695B, 1ms)"
+    },
+    {
+      "ts": 1785540962353,
+      "elapsed": 14370,
+      "phase": "api_get",
+      "path": "/api/discourse/stats?session=audit-test",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 123,
+      "summary": "/api/discourse/stats?session=audit-test → 200 (123B, 2ms)"
+    },
+    {
+      "ts": 1785540962353,
+      "elapsed": 14370,
+      "phase": "engine_state",
+      "ingestedChunks": 8647,
+      "ingestedFiles": 5,
+      "sourceCount": 5,
+      "pools": [
+        {
+          "name": "corpus",
+          "files": 5,
+          "chunks": 8647
+        }
+      ],
+      "summary": "Engine: 8647 chunks, 5 files, 5 sources"
+    },
+    {
+      "ts": 1785540962353,
+      "elapsed": 14370,
+      "phase": "phase",
+      "summary": "── Phase 4: Verbatim Search (engine-only) ──"
+    },
+    {
+      "ts": 1785540962635,
+      "elapsed": 14652,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Victor%20Frankenstein%20creature%20monster&limit=3",
+      "status": 200,
+      "duration": 281,
+      "sizeBytes": 3987,
+      "summary": "/api/verbatim?q=Victor%20Frankenstein%20creature%20monster&limit=3 → 200 (3987B, 281ms)"
+    },
+    {
+      "ts": 1785540962635,
+      "elapsed": 14652,
+      "phase": "verbatim_search",
+      "query": "Victor Frankenstein creature monster",
+      "total": 3,
+      "passages": 3,
+      "duration": 281,
+      "summary": "Search \"Victor Frankenstein creature monster\": 3 total, 3 passages in 281ms"
+    },
+    {
+      "ts": 1785540962910,
+      "elapsed": 14927,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Natasha%20ball%20dance&limit=3",
+      "status": 200,
+      "duration": 274,
+      "sizeBytes": 3898,
+      "summary": "/api/verbatim?q=Natasha%20ball%20dance&limit=3 → 200 (3898B, 274ms)"
+    },
+    {
+      "ts": 1785540962911,
+      "elapsed": 14928,
+      "phase": "verbatim_search",
+      "query": "Natasha ball dance",
+      "total": 3,
+      "passages": 3,
+      "duration": 275,
+      "summary": "Search \"Natasha ball dance\": 3 total, 3 passages in 275ms"
+    },
+    {
+      "ts": 1785540963187,
+      "elapsed": 15204,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Elizabeth%20Darcy%20pride&limit=3",
+      "status": 200,
+      "duration": 276,
+      "sizeBytes": 3756,
+      "summary": "/api/verbatim?q=Elizabeth%20Darcy%20pride&limit=3 → 200 (3756B, 276ms)"
+    },
+    {
+      "ts": 1785540963188,
+      "elapsed": 15205,
+      "phase": "verbatim_search",
+      "query": "Elizabeth Darcy pride",
+      "total": 3,
+      "passages": 3,
+      "duration": 277,
+      "summary": "Search \"Elizabeth Darcy pride\": 3 total, 3 passages in 277ms"
+    },
+    {
+      "ts": 1785540963463,
+      "elapsed": 15480,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Gregor%20Samsa%20transformation%20insect&limit=3",
+      "status": 200,
+      "duration": 274,
+      "sizeBytes": 3942,
+      "summary": "/api/verbatim?q=Gregor%20Samsa%20transformation%20insect&limit=3 → 200 (3942B, 274ms)"
+    },
+    {
+      "ts": 1785540963463,
+      "elapsed": 15480,
+      "phase": "verbatim_search",
+      "query": "Gregor Samsa transformation insect",
+      "total": 3,
+      "passages": 3,
+      "duration": 274,
+      "summary": "Search \"Gregor Samsa transformation insect\": 3 total, 3 passages in 274ms"
+    },
+    {
+      "ts": 1785540963745,
+      "elapsed": 15762,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=In%20the%20beginning%20God%20created&limit=3",
+      "status": 200,
+      "duration": 279,
+      "sizeBytes": 3831,
+      "summary": "/api/verbatim?q=In%20the%20beginning%20God%20created&limit=3 → 200 (3831B, 279ms)"
+    },
+    {
+      "ts": 1785540963745,
+      "elapsed": 15762,
+      "phase": "verbatim_search",
+      "query": "In the beginning God created",
+      "total": 3,
+      "passages": 3,
+      "duration": 279,
+      "summary": "Search \"In the beginning God created\": 3 total, 3 passages in 279ms"
+    },
+    {
+      "ts": 1785540963745,
+      "elapsed": 15762,
+      "phase": "phase",
+      "summary": "── Phase 5: Segment Reading ──"
+    },
+    {
+      "ts": 1785540964023,
+      "elapsed": 16040,
+      "phase": "api_get",
+      "path": "/api/verbatim/segment?q=Victor%20Frankenstein%20laboratory&max=5000",
+      "status": 200,
+      "duration": 278,
+      "sizeBytes": 5305,
+      "summary": "/api/verbatim/segment?q=Victor%20Frankenstein%20laboratory&max=5000 → 200 (5305B, 278ms)"
+    },
+    {
+      "ts": 1785540964023,
+      "elapsed": 16040,
+      "phase": "segment_read",
+      "segment": "Chapter 7",
+      "source": "/Users/mlacy/Documents/Default Project/pg84.txt",
+      "byteRange": "116124-121124",
+      "textLength": 4936,
+      "summary": "Segment: \"Chapter 7\" from /Users/mlacy/Documents/Default Project/pg84.txt"
+    },
+    {
+      "ts": 1785540964023,
+      "elapsed": 16040,
+      "phase": "phase",
+      "summary": "── Phase 6: Discourse Persistence ──"
+    },
+    {
+      "ts": 1785540964026,
+      "elapsed": 16043,
+      "phase": "api_post",
+      "path": "/api/discourse/message",
+      "status": 200,
+      "duration": 3,
+      "sizeBytes": 59,
+      "requestSize": 102,
+      "summary": "POST /api/discourse/message → 200 (59B, 3ms)"
+    },
+    {
+      "ts": 1785540964028,
+      "elapsed": 16045,
+      "phase": "api_post",
+      "path": "/api/discourse/message",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 59,
+      "requestSize": 112,
+      "summary": "POST /api/discourse/message → 200 (59B, 2ms)"
+    },
+    {
+      "ts": 1785540964030,
+      "elapsed": 16047,
+      "phase": "api_get",
+      "path": "/api/discourse/stats?session=audit-test",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 124,
+      "summary": "/api/discourse/stats?session=audit-test → 200 (124B, 2ms)"
+    },
+    {
+      "ts": 1785540964031,
+      "elapsed": 16048,
+      "phase": "api_get",
+      "path": "/api/discourse?session=audit-test",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 300,
+      "summary": "/api/discourse?session=audit-test → 200 (300B, 1ms)"
+    },
+    {
+      "ts": 1785540964031,
+      "elapsed": 16048,
+      "phase": "discourse_test",
+      "messageCount": 2,
+      "tokens": 30,
+      "usagePercent": 0,
+      "summary": "Discourse: 2 messages, 30 tokens (0%)"
+    },
+    {
+      "ts": 1785540964031,
+      "elapsed": 16048,
+      "phase": "phase",
+      "summary": "── Phase 7: Priors ──"
+    },
+    {
+      "ts": 1785540964934,
+      "elapsed": 16951,
+      "phase": "api_get",
+      "path": "/api/priors",
+      "status": 200,
+      "duration": 903,
+      "sizeBytes": 8512,
+      "summary": "/api/priors → 200 (8512B, 903ms)"
+    },
+    {
+      "ts": 1785540964935,
+      "elapsed": 16952,
+      "phase": "priors_catalog",
+      "count": 16,
+      "pool": "priors",
+      "gaps": [
+        "corpus-prior-cube: raw not admitted to the engine (5.1MB > 2MB cap); card is indexed, raw is readable by byte range"
+      ],
+      "priorsList": [
+        "coding-priors",
+        "coref/pg84-frankenstein",
+        "corpus-prior-cube",
+        "corpus-prior-rebuild",
+        "corpus-prior",
+        "genre-convergence",
+        "genre-matrix",
+        "holons-L1",
+        "holons-L2",
+        "kind-discovery-convergence",
+        "kind-discovery-mutual",
+        "kind-discovery",
+        "lens-fold",
+        "lens-ledger",
+        "morphology-eng",
+        "music-motion-overture"
+      ],
+      "summary": "Priors: 16 in pool \"priors\""
+    },
+    {
+      "ts": 1785540964937,
+      "elapsed": 16954,
+      "phase": "api_get",
+      "path": "/api/priors/read?id=coding-priors",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 21735,
+      "summary": "/api/priors/read?id=coding-priors → 200 (21735B, 2ms)"
+    },
+    {
+      "ts": 1785540964937,
+      "elapsed": 16954,
+      "phase": "priors_read",
+      "id": "coding-priors",
+      "status": 200,
+      "summary": "Read prior \"coding-priors\" → 200"
+    },
+    {
+      "ts": 1785540965001,
+      "elapsed": 17018,
+      "phase": "api_get",
+      "path": "/api/priors/search?q=entity&limit=3",
+      "status": 200,
+      "duration": 64,
+      "sizeBytes": 4164,
+      "summary": "/api/priors/search?q=entity&limit=3 → 200 (4164B, 64ms)"
+    },
+    {
+      "ts": 1785540965001,
+      "elapsed": 17018,
+      "phase": "priors_search",
+      "query": "entity",
+      "results": 0,
+      "summary": "Prior search \"entity\": 0 results"
+    },
+    {
+      "ts": 1785540965001,
+      "elapsed": 17018,
+      "phase": "phase",
+      "summary": "── Phase 8: Chat with Documents (LLM) ──"
+    },
+    {
+      "ts": 1785540965003,
+      "elapsed": 17020,
+      "phase": "chat_start",
+      "question": "How does Victor Frankenstein react when the creature comes to life?",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785540965290,
+      "elapsed": 17307,
+      "phase": "tools_available",
+      "count": 2
+    },
+    {
+      "ts": 1785540965291,
+      "elapsed": 17308,
+      "phase": "grounding",
+      "sourceCount": 30,
+      "foldedCount": 4,
+      "tokens": 2000,
+      "citationCount": 4,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 30 sources, 4 folded, 2000 tokens, 4 citations"
+    },
+    {
+      "ts": 1785540965291,
+      "elapsed": 17308,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "llama3.2:latest",
+      "toolCount": 2,
+      "summary": "LLM call round 0: model=llama3.2:latest, tools=2"
+    },
+    {
+      "ts": 1785540974698,
+      "elapsed": 26715,
+      "phase": "tool_call",
+      "name": "verbatim_search",
+      "args": "{\"limit\":\"40\",\"query\":\"Victor Frankenstein reaction to creature coming to life\"}",
+      "summary": "Tool call: verbatim_search({\"limit\":\"40\",\"query\":\"Victor Frankenstein reaction to creature coming to life\"})"
+    },
+    {
+      "ts": 1785540974699,
+      "elapsed": 26716,
+      "phase": "tool_result",
+      "name": "verbatim_search",
+      "resultPreview": "Found 40 verbatim spans:\n\n[1] span:span:fnv128:eaea9629a16c8e9fd23a18e36d626481 score:0.45 source:source:/Users/mlacy/Documents/Default Project/pg84.txt:chunk byte:174863-175665\ny rage was without bou",
+      "summary": "Tool result: verbatim_search → Found 40 verbatim spans:\n\n[1] span:span:fnv128:eaea9629a16c8e9fd23a18e36d626481 score:0.45 source:so"
+    },
+    {
+      "ts": 1785540974700,
+      "elapsed": 26717,
+      "phase": "llm_call",
+      "round": 1,
+      "model": "llama3.2:latest",
+      "toolCount": 2,
+      "summary": "LLM call round 1: model=llama3.2:latest, tools=2"
+    },
+    {
+      "ts": 1785540985554,
+      "elapsed": 37571,
+      "phase": "response",
+      "model": "llama3.2:latest",
+      "contentLength": 389,
+      "contentPreview": "Victor Frankenstein reacts with rage and horror when the creature comes to life. He is overwhelmed by emotions, including hatred, anger, and a desire for revenge against the creature he had created. H",
+      "summary": "Response (llama3.2:latest): Victor Frankenstein reacts with rage and horror when the creature comes to life. He is overwhelmed b"
+    },
+    {
+      "ts": 1785540985555,
+      "elapsed": 37572,
+      "phase": "chat_complete",
+      "question": "How does Victor Frankenstein react when the creature comes to life?",
+      "duration": 20552,
+      "model": "llama3.2:latest",
+      "llmRounds": 2,
+      "toolCallCount": 1,
+      "groundingCitations": 4,
+      "citationsUsed": 0,
+      "sseEvents": 8,
+      "summary": "Chat done in 20552ms: model=llama3.2:latest, rounds=2, tools=1, grounding citations=4, response citations=0"
+    },
+    {
+      "ts": 1785540985556,
+      "elapsed": 37573,
+      "phase": "citation_audit",
+      "question": "How does Victor Frankenstein react when the creature comes t",
+      "available": [
+        "[1]",
+        "[2]",
+        "[3]",
+        "[4]"
+      ],
+      "used": [],
+      "grounded": true,
+      "summary": "Citations: available=[1],[2],[3],[4], used=none"
+    },
+    {
+      "ts": 1785540985556,
+      "elapsed": 37573,
+      "phase": "chat_start",
+      "question": "What does Natasha Rostova feel at her first ball?",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785540985869,
+      "elapsed": 37886,
+      "phase": "tools_available",
+      "count": 2
+    },
+    {
+      "ts": 1785540985869,
+      "elapsed": 37886,
+      "phase": "grounding",
+      "sourceCount": 30,
+      "foldedCount": 4,
+      "tokens": 2000,
+      "citationCount": 4,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 30 sources, 4 folded, 2000 tokens, 4 citations"
+    },
+    {
+      "ts": 1785540985869,
+      "elapsed": 37886,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "llama3.2:latest",
+      "toolCount": 2,
+      "summary": "LLM call round 0: model=llama3.2:latest, tools=2"
+    },
+    {
+      "ts": 1785540990871,
+      "elapsed": 42888,
+      "phase": "fatal",
+      "error": "terminated",
+      "stack": "TypeError: terminated\n    at Fetch.onAborted (node:internal/deps/undici/undici:12141:53)\n    at Fetch.emit (node:events:508:28)\n    at Fetch.terminate (node:internal/deps/undici/undici:11300:14)\n    at Object.onError (node:internal/deps/undici/undici:12260:38)\n    at Request.onError (node:internal/deps/undici/undici:2754:31)\n    at Object.errorRequest (node:internal/deps/undici/undici:1641:17)\n    at Socket.onHttpSocketClose (node:internal/deps/undici/undici:7173:14)\n    at Socket.emit (node:events:520:35)\n    at TCP.<anonymous> (node:net:346:12)"
+    }
+  ],
+  "summary": {
+    "totalEvents": 70,
+    "phases": [
+      "proxy_start",
+      "phase",
+      "api_get",
+      "import_start",
+      "api_post",
+      "import_done",
+      "engine_state",
+      "verbatim_search",
+      "segment_read",
+      "discourse_test",
+      "priors_catalog",
+      "priors_read",
+      "priors_search",
+      "chat_start",
+      "tools_available",
+      "grounding",
+      "llm_call",
+      "tool_call",
+      "tool_result",
+      "response",
+      "chat_complete",
+      "citation_audit",
+      "fatal"
+    ],
+    "errors": 1
+  }
+}

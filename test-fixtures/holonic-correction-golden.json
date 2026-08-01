@@ -1,0 +1,27 @@
+{
+  "_comment": "Frozen fixture for scripts/score-holonic-correction-golden.mjs. surf[0] is a real passage retrieved from pg84.txt (Frankenstein) via engineSearch — span_id/byte_start/byte_end are genuine engine output, not fabricated. draft0 is deliberately unrelated to the passage (low grounding). draft1 is a hand-written faithful paraphrase of the passage (real comprehension, not verbatim copying) and must score above threshold. This validates that the correction loop's grounding score rewards genuine restatement, not just string overlap.",
+  "task": "write a short essay about Victor's preparation to animate the Creature in Frankenstein",
+  "subTask": {
+    "id": "preparation",
+    "label": "Victor's Scientific Preparation",
+    "description": "Describe how Victor studied anatomy and the decay of the human body in order to prepare himself to create the Creature."
+  },
+  "surf": [
+    {
+      "text": "acquainted with the science of anatomy, but this was not sufficient; I\r\nmust also observe the natural decay and corruption of the human body.\r\nIn my education my father had taken the greatest precautions that my\r\nmind should be impressed with no supernatural horrors. I do not ever\r\nremember to have trembled at a tale of superstition or to have feared\r\nthe apparition of a spirit. Darkness had no effect upon my fancy, and\r\na churchyard was to me merely the receptacle of bodies deprived of\r\nlife, which, from being the seat of beauty and strength, had become\r\nfood for the worm. Now I was led to examine the cause and progress of\r\nthis decay and forced to spend days and nights in vaults and\r\ncharnel-houses. My attention was fixed upon every object the most\r\ninsupportable to the delicacy of the h",
+      "source": "source:/Users/mlacy/Documents/Default Project/pg84.txt:chunk-36",
+      "score": 0.4464487954591008,
+      "spanId": "passage:sha256:965e3d76886c5a66fc49016b46e2c2b9cce3636b88aea1c14a8e63c06f1f8672",
+      "byteStart": 75773,
+      "byteEnd": 77822
+    }
+  ],
+  "draft0": "This section covers broad themes about growth and personal discovery, exploring how one might come to understand the wider world through everyday experience and reflection.",
+  "draft1": "Knowing anatomy alone was not enough; Victor also had to study the natural decay and corruption of the human body. Because his father had shielded him from superstition as a child, he had never trembled at ghost stories and felt no dread of the supernatural, a churchyard was, to him, simply a place holding bodies emptied of life, their former beauty reduced to food for worms. This led him to examine the process of this decay directly, spending days and nights in vaults and charnel-houses, his attention fixed on details most people would find unbearable.",
+  "expected": {
+    "draft0BelowThreshold": true,
+    "draft1AboveThreshold": true,
+    "draft1ScoreHigherThanDraft0": true,
+    "underCoveredSurfIndexOnDraft0": [0]
+  }
+}

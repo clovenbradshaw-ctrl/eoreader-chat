@@ -1,0 +1,286 @@
+{
+  "startTime": 1785339622490,
+  "endTime": 1785339684144,
+  "duration": 61654,
+  "entries": [
+    {
+      "ts": 1785339622538,
+      "elapsed": 48,
+      "phase": "proxy_start",
+      "summary": "Starting proxy.js..."
+    },
+    {
+      "ts": 1785339622848,
+      "elapsed": 358,
+      "phase": "proxy_start",
+      "summary": "Proxy already running, reusing"
+    },
+    {
+      "ts": 1785339622848,
+      "elapsed": 358,
+      "phase": "phase",
+      "summary": "── Phase 1: Health & Stats ──"
+    },
+    {
+      "ts": 1785339622866,
+      "elapsed": 376,
+      "phase": "api_get",
+      "path": "/health",
+      "status": 200,
+      "duration": 17,
+      "sizeBytes": 51,
+      "summary": "/health → 200 (51B, 17ms)"
+    },
+    {
+      "ts": 1785339622891,
+      "elapsed": 401,
+      "phase": "api_get",
+      "path": "/stats",
+      "status": 200,
+      "duration": 25,
+      "sizeBytes": 74,
+      "summary": "/stats → 200 (74B, 25ms)"
+    },
+    {
+      "ts": 1785339622949,
+      "elapsed": 459,
+      "phase": "api_get",
+      "path": "/v1/models",
+      "status": 200,
+      "duration": 58,
+      "sizeBytes": 55,
+      "summary": "/v1/models → 200 (55B, 58ms)"
+    },
+    {
+      "ts": 1785339622949,
+      "elapsed": 459,
+      "phase": "phase",
+      "summary": "── Phase 2: Document Import ──"
+    },
+    {
+      "ts": 1785339622949,
+      "elapsed": 459,
+      "phase": "import_start",
+      "label": "Frankenstein",
+      "path": "/Users/mlacy/Documents/Default Project/pg84.txt",
+      "sizeBytes": 448885,
+      "summary": "Importing Frankenstein (438KB)..."
+    },
+    {
+      "ts": 1785339623513,
+      "elapsed": 1023,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 400,
+      "duration": 563,
+      "sizeBytes": 122,
+      "requestSize": 58,
+      "summary": "POST /api/ingest → 400 (122B, 563ms)"
+    },
+    {
+      "ts": 1785339623513,
+      "elapsed": 1023,
+      "phase": "import_done",
+      "label": "Frankenstein",
+      "duration": 564,
+      "summary": "Imported Frankenstein: undefined chunks in 564ms"
+    },
+    {
+      "ts": 1785339623513,
+      "elapsed": 1023,
+      "phase": "phase",
+      "summary": "── Phase 3: Engine State After Import ──"
+    },
+    {
+      "ts": 1785339623699,
+      "elapsed": 1209,
+      "phase": "api_get",
+      "path": "/api/grounded/stats",
+      "status": 200,
+      "duration": 186,
+      "sizeBytes": 242,
+      "summary": "/api/grounded/stats → 200 (242B, 186ms)"
+    },
+    {
+      "ts": 1785339623759,
+      "elapsed": 1269,
+      "phase": "api_get",
+      "path": "/api/sources",
+      "status": 200,
+      "duration": 60,
+      "sizeBytes": 7221,
+      "summary": "/api/sources → 200 (7221B, 60ms)"
+    },
+    {
+      "ts": 1785339623809,
+      "elapsed": 1319,
+      "phase": "api_get",
+      "path": "/api/discourse/stats?session=audit-test",
+      "status": 200,
+      "duration": 50,
+      "sizeBytes": 123,
+      "summary": "/api/discourse/stats?session=audit-test → 200 (123B, 50ms)"
+    },
+    {
+      "ts": 1785339623809,
+      "elapsed": 1319,
+      "phase": "engine_state",
+      "ingestedChunks": 4599,
+      "ingestedFiles": 37,
+      "sourceCount": 37,
+      "pools": [
+        {
+          "name": "corpus",
+          "files": 4,
+          "chunks": 3917
+        },
+        {
+          "name": "priors",
+          "files": 33,
+          "chunks": 682
+        }
+      ],
+      "summary": "Engine: 4599 chunks, 37 files, 37 sources"
+    },
+    {
+      "ts": 1785339623809,
+      "elapsed": 1319,
+      "phase": "phase",
+      "summary": "── Phase 4: Verbatim Search (engine-only) ──"
+    },
+    {
+      "ts": 1785339638830,
+      "elapsed": 16340,
+      "phase": "api_get_error",
+      "path": "/api/verbatim?q=Victor%20Frankenstein%20creature%20monster&limit=5",
+      "error": "The operation was aborted due to timeout",
+      "duration": 15021
+    },
+    {
+      "ts": 1785339638830,
+      "elapsed": 16340,
+      "phase": "verbatim_search_error",
+      "query": "Victor Frankenstein creature monster",
+      "error": "The operation was aborted due to timeout"
+    },
+    {
+      "ts": 1785339653878,
+      "elapsed": 31388,
+      "phase": "api_get_error",
+      "path": "/api/verbatim?q=Natasha%20ball%20dance&limit=5",
+      "error": "The operation was aborted due to timeout",
+      "duration": 15047
+    },
+    {
+      "ts": 1785339653895,
+      "elapsed": 31405,
+      "phase": "verbatim_search_error",
+      "query": "Natasha ball dance",
+      "error": "The operation was aborted due to timeout"
+    },
+    {
+      "ts": 1785339668933,
+      "elapsed": 46443,
+      "phase": "api_get_error",
+      "path": "/api/verbatim?q=Elizabeth%20Darcy%20pride&limit=5",
+      "error": "The operation was aborted due to timeout",
+      "duration": 15037
+    },
+    {
+      "ts": 1785339668942,
+      "elapsed": 46452,
+      "phase": "verbatim_search_error",
+      "query": "Elizabeth Darcy pride",
+      "error": "The operation was aborted due to timeout"
+    },
+    {
+      "ts": 1785339683944,
+      "elapsed": 61454,
+      "phase": "api_get_error",
+      "path": "/api/verbatim?q=Gregor%20Samsa%20transformation%20insect&limit=5",
+      "error": "The operation was aborted due to timeout",
+      "duration": 15002
+    },
+    {
+      "ts": 1785339683944,
+      "elapsed": 61454,
+      "phase": "verbatim_search_error",
+      "query": "Gregor Samsa transformation insect",
+      "error": "The operation was aborted due to timeout"
+    },
+    {
+      "ts": 1785339684138,
+      "elapsed": 61648,
+      "phase": "api_get_error",
+      "path": "/api/verbatim?q=In%20the%20beginning%20God%20created&limit=5",
+      "error": "fetch failed",
+      "duration": 194
+    },
+    {
+      "ts": 1785339684138,
+      "elapsed": 61648,
+      "phase": "verbatim_search_error",
+      "query": "In the beginning God created",
+      "error": "fetch failed"
+    },
+    {
+      "ts": 1785339684138,
+      "elapsed": 61648,
+      "phase": "phase",
+      "summary": "── Phase 5: Segment Reading ──"
+    },
+    {
+      "ts": 1785339684140,
+      "elapsed": 61650,
+      "phase": "api_get_error",
+      "path": "/api/verbatim/segment?q=Victor%20Frankenstein%20laboratory&max=5000",
+      "error": "fetch failed",
+      "duration": 2
+    },
+    {
+      "ts": 1785339684140,
+      "elapsed": 61650,
+      "phase": "segment_error",
+      "error": "fetch failed"
+    },
+    {
+      "ts": 1785339684140,
+      "elapsed": 61650,
+      "phase": "phase",
+      "summary": "── Phase 6: Discourse Persistence ──"
+    },
+    {
+      "ts": 1785339684143,
+      "elapsed": 61653,
+      "phase": "api_post_error",
+      "path": "/api/discourse/message",
+      "error": "fetch failed",
+      "duration": 3
+    },
+    {
+      "ts": 1785339684144,
+      "elapsed": 61654,
+      "phase": "fatal",
+      "error": "fetch failed",
+      "stack": "TypeError: fetch failed\n    at node:internal/deps/undici/undici:15845:13\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async apiPost (file:///Users/mlacy/Documents/Default%20Project/eoreader-chat/test-eochat-audit.mjs:127:18)\n    at async main (file:///Users/mlacy/Documents/Default%20Project/eoreader-chat/test-eochat-audit.mjs:540:5)"
+    }
+  ],
+  "summary": {
+    "totalEvents": 32,
+    "phases": [
+      "proxy_start",
+      "phase",
+      "api_get",
+      "import_start",
+      "api_post",
+      "import_done",
+      "engine_state",
+      "api_get_error",
+      "verbatim_search_error",
+      "segment_error",
+      "api_post_error",
+      "fatal"
+    ],
+    "errors": 14
+  }
+}

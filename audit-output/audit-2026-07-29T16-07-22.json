@@ -1,0 +1,1148 @@
+{
+  "startTime": 1785340852624,
+  "endTime": 1785341242967,
+  "duration": 390343,
+  "entries": [
+    {
+      "ts": 1785340852626,
+      "elapsed": 2,
+      "phase": "proxy_start",
+      "summary": "Starting proxy.js..."
+    },
+    {
+      "ts": 1785340957898,
+      "elapsed": 105274,
+      "phase": "proxy_ready",
+      "summary": "Proxy ready: EO_PROXY_READY:11435"
+    },
+    {
+      "ts": 1785340958881,
+      "elapsed": 106257,
+      "phase": "proxy_ready",
+      "storeSize": 10001,
+      "uptime": "106.2",
+      "summary": "Proxy ready: store=10001, uptime=106.2s"
+    },
+    {
+      "ts": 1785340958881,
+      "elapsed": 106257,
+      "phase": "phase",
+      "summary": "── Phase 1: Health & Stats ──"
+    },
+    {
+      "ts": 1785340958884,
+      "elapsed": 106260,
+      "phase": "api_get",
+      "path": "/health",
+      "status": 200,
+      "duration": 3,
+      "sizeBytes": 51,
+      "summary": "/health → 200 (51B, 3ms)"
+    },
+    {
+      "ts": 1785340958885,
+      "elapsed": 106261,
+      "phase": "api_get",
+      "path": "/stats",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 74,
+      "summary": "/stats → 200 (74B, 1ms)"
+    },
+    {
+      "ts": 1785340958886,
+      "elapsed": 106262,
+      "phase": "api_get",
+      "path": "/v1/models",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 55,
+      "summary": "/v1/models → 200 (55B, 1ms)"
+    },
+    {
+      "ts": 1785340958886,
+      "elapsed": 106262,
+      "phase": "phase",
+      "summary": "── Phase 2: Document Import ──"
+    },
+    {
+      "ts": 1785340958886,
+      "elapsed": 106262,
+      "phase": "import_start",
+      "label": "Frankenstein",
+      "path": "/Users/mlacy/Documents/Default Project/pg84.txt",
+      "sizeBytes": 448885,
+      "summary": "Importing Frankenstein (438KB)..."
+    },
+    {
+      "ts": 1785340958895,
+      "elapsed": 106271,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 400,
+      "duration": 9,
+      "sizeBytes": 122,
+      "requestSize": 58,
+      "summary": "POST /api/ingest → 400 (122B, 9ms)"
+    },
+    {
+      "ts": 1785340958895,
+      "elapsed": 106271,
+      "phase": "import_done",
+      "label": "Frankenstein",
+      "duration": 9,
+      "summary": "Imported Frankenstein: undefined chunks in 9ms"
+    },
+    {
+      "ts": 1785340958895,
+      "elapsed": 106271,
+      "phase": "import_start",
+      "label": "War and Peace",
+      "path": "/Users/mlacy/Downloads/pg2600.txt",
+      "sizeBytes": 3359610,
+      "summary": "Importing War and Peace (3281KB)..."
+    },
+    {
+      "ts": 1785340958910,
+      "elapsed": 106286,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 400,
+      "duration": 15,
+      "sizeBytes": 122,
+      "requestSize": 44,
+      "summary": "POST /api/ingest → 400 (122B, 15ms)"
+    },
+    {
+      "ts": 1785340958910,
+      "elapsed": 106286,
+      "phase": "import_done",
+      "label": "War and Peace",
+      "duration": 15,
+      "summary": "Imported War and Peace: undefined chunks in 15ms"
+    },
+    {
+      "ts": 1785340958910,
+      "elapsed": 106286,
+      "phase": "import_start",
+      "label": "KJV Bible",
+      "path": "/Users/mlacy/Downloads/pg10.txt",
+      "sizeBytes": 4455950,
+      "summary": "Importing KJV Bible (4352KB)..."
+    },
+    {
+      "ts": 1785340958928,
+      "elapsed": 106304,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 400,
+      "duration": 18,
+      "sizeBytes": 122,
+      "requestSize": 42,
+      "summary": "POST /api/ingest → 400 (122B, 18ms)"
+    },
+    {
+      "ts": 1785340958928,
+      "elapsed": 106304,
+      "phase": "import_done",
+      "label": "KJV Bible",
+      "duration": 18,
+      "summary": "Imported KJV Bible: undefined chunks in 18ms"
+    },
+    {
+      "ts": 1785340958930,
+      "elapsed": 106306,
+      "phase": "import_start",
+      "label": "Pride and Prejudice",
+      "path": "/Users/mlacy/Downloads/pg1342.txt",
+      "sizeBytes": 772386,
+      "summary": "Importing Pride and Prejudice (754KB)..."
+    },
+    {
+      "ts": 1785340967822,
+      "elapsed": 115198,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 200,
+      "duration": 8892,
+      "sizeBytes": 11103,
+      "requestSize": 44,
+      "summary": "POST /api/ingest → 200 (11103B, 8892ms)"
+    },
+    {
+      "ts": 1785340967822,
+      "elapsed": 115198,
+      "phase": "import_done",
+      "label": "Pride and Prejudice",
+      "chunks": 359,
+      "pool": "corpus",
+      "duration": 8894,
+      "summary": "Imported Pride and Prejudice: 359 chunks in 8894ms"
+    },
+    {
+      "ts": 1785340967823,
+      "elapsed": 115199,
+      "phase": "import_start",
+      "label": "Metamorphosis",
+      "path": "/Users/mlacy/Downloads/pg5200.txt",
+      "sizeBytes": 141933,
+      "summary": "Importing Metamorphosis (139KB)..."
+    },
+    {
+      "ts": 1785340969349,
+      "elapsed": 116725,
+      "phase": "api_post",
+      "path": "/api/ingest",
+      "status": 200,
+      "duration": 1526,
+      "sizeBytes": 1843,
+      "requestSize": 44,
+      "summary": "POST /api/ingest → 200 (1843B, 1526ms)"
+    },
+    {
+      "ts": 1785340969350,
+      "elapsed": 116726,
+      "phase": "import_done",
+      "label": "Metamorphosis",
+      "chunks": 59,
+      "pool": "corpus",
+      "duration": 1528,
+      "summary": "Imported Metamorphosis: 59 chunks in 1528ms"
+    },
+    {
+      "ts": 1785340969350,
+      "elapsed": 116726,
+      "phase": "phase",
+      "summary": "── Phase 3: Engine State After Import ──"
+    },
+    {
+      "ts": 1785340970912,
+      "elapsed": 118288,
+      "phase": "api_get",
+      "path": "/api/grounded/stats",
+      "status": 200,
+      "duration": 1562,
+      "sizeBytes": 257,
+      "summary": "/api/grounded/stats → 200 (257B, 1562ms)"
+    },
+    {
+      "ts": 1785340970914,
+      "elapsed": 118290,
+      "phase": "api_get",
+      "path": "/api/sources",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 7365,
+      "summary": "/api/sources → 200 (7365B, 2ms)"
+    },
+    {
+      "ts": 1785340970915,
+      "elapsed": 118291,
+      "phase": "api_get",
+      "path": "/api/discourse/stats?session=audit-test",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 123,
+      "summary": "/api/discourse/stats?session=audit-test → 200 (123B, 1ms)"
+    },
+    {
+      "ts": 1785340970915,
+      "elapsed": 118291,
+      "phase": "engine_state",
+      "ingestedChunks": 5019,
+      "ingestedFiles": 38,
+      "sourceCount": 38,
+      "pools": [
+        {
+          "name": "corpus",
+          "files": 5,
+          "chunks": 4334
+        },
+        {
+          "name": "priors",
+          "files": 33,
+          "chunks": 685
+        }
+      ],
+      "summary": "Engine: 5019 chunks, 38 files, 38 sources"
+    },
+    {
+      "ts": 1785340970915,
+      "elapsed": 118291,
+      "phase": "phase",
+      "summary": "── Phase 4: Verbatim Search (engine-only) ──"
+    },
+    {
+      "ts": 1785340973844,
+      "elapsed": 121220,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Victor%20Frankenstein%20creature%20monster&limit=3",
+      "status": 200,
+      "duration": 2928,
+      "sizeBytes": 3786,
+      "summary": "/api/verbatim?q=Victor%20Frankenstein%20creature%20monster&limit=3 → 200 (3786B, 2928ms)"
+    },
+    {
+      "ts": 1785340973844,
+      "elapsed": 121220,
+      "phase": "verbatim_search",
+      "query": "Victor Frankenstein creature monster",
+      "total": 3,
+      "passages": 3,
+      "duration": 2928,
+      "summary": "Search \"Victor Frankenstein creature monster\": 3 total, 3 passages in 2928ms"
+    },
+    {
+      "ts": 1785340976707,
+      "elapsed": 124083,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Natasha%20ball%20dance&limit=3",
+      "status": 200,
+      "duration": 2862,
+      "sizeBytes": 3785,
+      "summary": "/api/verbatim?q=Natasha%20ball%20dance&limit=3 → 200 (3785B, 2862ms)"
+    },
+    {
+      "ts": 1785340976707,
+      "elapsed": 124083,
+      "phase": "verbatim_search",
+      "query": "Natasha ball dance",
+      "total": 3,
+      "passages": 3,
+      "duration": 2862,
+      "summary": "Search \"Natasha ball dance\": 3 total, 3 passages in 2862ms"
+    },
+    {
+      "ts": 1785340979420,
+      "elapsed": 126796,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Elizabeth%20Darcy%20pride&limit=3",
+      "status": 200,
+      "duration": 2712,
+      "sizeBytes": 3749,
+      "summary": "/api/verbatim?q=Elizabeth%20Darcy%20pride&limit=3 → 200 (3749B, 2712ms)"
+    },
+    {
+      "ts": 1785340979420,
+      "elapsed": 126796,
+      "phase": "verbatim_search",
+      "query": "Elizabeth Darcy pride",
+      "total": 3,
+      "passages": 3,
+      "duration": 2712,
+      "summary": "Search \"Elizabeth Darcy pride\": 3 total, 3 passages in 2712ms"
+    },
+    {
+      "ts": 1785340982106,
+      "elapsed": 129482,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=Gregor%20Samsa%20transformation%20insect&limit=3",
+      "status": 200,
+      "duration": 2684,
+      "sizeBytes": 3763,
+      "summary": "/api/verbatim?q=Gregor%20Samsa%20transformation%20insect&limit=3 → 200 (3763B, 2684ms)"
+    },
+    {
+      "ts": 1785340982106,
+      "elapsed": 129482,
+      "phase": "verbatim_search",
+      "query": "Gregor Samsa transformation insect",
+      "total": 3,
+      "passages": 3,
+      "duration": 2684,
+      "summary": "Search \"Gregor Samsa transformation insect\": 3 total, 3 passages in 2684ms"
+    },
+    {
+      "ts": 1785340984647,
+      "elapsed": 132023,
+      "phase": "api_get",
+      "path": "/api/verbatim?q=In%20the%20beginning%20God%20created&limit=3",
+      "status": 200,
+      "duration": 2541,
+      "sizeBytes": 3802,
+      "summary": "/api/verbatim?q=In%20the%20beginning%20God%20created&limit=3 → 200 (3802B, 2541ms)"
+    },
+    {
+      "ts": 1785340984647,
+      "elapsed": 132023,
+      "phase": "verbatim_search",
+      "query": "In the beginning God created",
+      "total": 3,
+      "passages": 3,
+      "duration": 2541,
+      "summary": "Search \"In the beginning God created\": 3 total, 3 passages in 2541ms"
+    },
+    {
+      "ts": 1785340984647,
+      "elapsed": 132023,
+      "phase": "phase",
+      "summary": "── Phase 5: Segment Reading ──"
+    },
+    {
+      "ts": 1785340987040,
+      "elapsed": 134416,
+      "phase": "api_get",
+      "path": "/api/verbatim/segment?q=Victor%20Frankenstein%20laboratory&max=5000",
+      "status": 200,
+      "duration": 2393,
+      "sizeBytes": 7356,
+      "summary": "/api/verbatim/segment?q=Victor%20Frankenstein%20laboratory&max=5000 → 200 (7356B, 2393ms)"
+    },
+    {
+      "ts": 1785340987040,
+      "elapsed": 134416,
+      "phase": "segment_read",
+      "segment": "(no structural boundary detected)",
+      "source": "/Users/mlacy/Documents/Default Project/pg84.txt",
+      "byteRange": "421681-428681",
+      "textLength": 6970,
+      "summary": "Segment: \"(no structural boundary detected)\" from /Users/mlacy/Documents/Default Project/pg84.txt"
+    },
+    {
+      "ts": 1785340987040,
+      "elapsed": 134416,
+      "phase": "phase",
+      "summary": "── Phase 6: Discourse Persistence ──"
+    },
+    {
+      "ts": 1785340987043,
+      "elapsed": 134419,
+      "phase": "api_post",
+      "path": "/api/discourse/message",
+      "status": 200,
+      "duration": 3,
+      "sizeBytes": 59,
+      "requestSize": 102,
+      "summary": "POST /api/discourse/message → 200 (59B, 3ms)"
+    },
+    {
+      "ts": 1785340987045,
+      "elapsed": 134421,
+      "phase": "api_post",
+      "path": "/api/discourse/message",
+      "status": 200,
+      "duration": 2,
+      "sizeBytes": 59,
+      "requestSize": 112,
+      "summary": "POST /api/discourse/message → 200 (59B, 2ms)"
+    },
+    {
+      "ts": 1785340987045,
+      "elapsed": 134421,
+      "phase": "api_get",
+      "path": "/api/discourse/stats?session=audit-test",
+      "status": 200,
+      "duration": 0,
+      "sizeBytes": 124,
+      "summary": "/api/discourse/stats?session=audit-test → 200 (124B, 0ms)"
+    },
+    {
+      "ts": 1785340987045,
+      "elapsed": 134421,
+      "phase": "api_get",
+      "path": "/api/discourse?session=audit-test",
+      "status": 200,
+      "duration": 0,
+      "sizeBytes": 300,
+      "summary": "/api/discourse?session=audit-test → 200 (300B, 0ms)"
+    },
+    {
+      "ts": 1785340987045,
+      "elapsed": 134421,
+      "phase": "discourse_test",
+      "messageCount": 2,
+      "tokens": 30,
+      "usagePercent": 0,
+      "summary": "Discourse: 2 messages, 30 tokens (0%)"
+    },
+    {
+      "ts": 1785340987045,
+      "elapsed": 134421,
+      "phase": "phase",
+      "summary": "── Phase 7: Priors ──"
+    },
+    {
+      "ts": 1785340987046,
+      "elapsed": 134422,
+      "phase": "api_get",
+      "path": "/api/priors",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 9268,
+      "summary": "/api/priors → 200 (9268B, 1ms)"
+    },
+    {
+      "ts": 1785340987046,
+      "elapsed": 134422,
+      "phase": "priors_catalog",
+      "count": 17,
+      "pool": "priors",
+      "gaps": [
+        "corpus-prior-cube: raw not admitted to the engine (7.5MB > 2MB cap); card is indexed, raw is readable by byte range"
+      ],
+      "priorsList": [
+        "coding-priors",
+        "compression-similarity",
+        "coref/pg1342-prideandprejudice",
+        "coref/pg2600-warandpeace",
+        "coref/pg84-frankenstein",
+        "corpus-prior-cube",
+        "corpus-prior-rebuild",
+        "corpus-prior",
+        "genre-convergence",
+        "genre-matrix",
+        "holons-L1",
+        "holons-L2",
+        "kind-discovery-convergence",
+        "kind-discovery-mutual",
+        "kind-discovery",
+        "lens-fold",
+        "lens-ledger"
+      ],
+      "summary": "Priors: 17 in pool \"priors\""
+    },
+    {
+      "ts": 1785340987046,
+      "elapsed": 134422,
+      "phase": "api_get",
+      "path": "/api/priors/read?id=coding-priors",
+      "status": 200,
+      "duration": 0,
+      "sizeBytes": 22062,
+      "summary": "/api/priors/read?id=coding-priors → 200 (22062B, 0ms)"
+    },
+    {
+      "ts": 1785340987046,
+      "elapsed": 134422,
+      "phase": "priors_read",
+      "id": "coding-priors",
+      "status": 200,
+      "summary": "Read prior \"coding-priors\" → 200"
+    },
+    {
+      "ts": 1785340987331,
+      "elapsed": 134707,
+      "phase": "api_get",
+      "path": "/api/priors/search?q=entity&limit=3",
+      "status": 200,
+      "duration": 285,
+      "sizeBytes": 4260,
+      "summary": "/api/priors/search?q=entity&limit=3 → 200 (4260B, 285ms)"
+    },
+    {
+      "ts": 1785340987331,
+      "elapsed": 134707,
+      "phase": "priors_search",
+      "query": "entity",
+      "results": 0,
+      "summary": "Prior search \"entity\": 0 results"
+    },
+    {
+      "ts": 1785340987331,
+      "elapsed": 134707,
+      "phase": "phase",
+      "summary": "── Phase 8: Chat with Documents (LLM) ──"
+    },
+    {
+      "ts": 1785340987331,
+      "elapsed": 134707,
+      "phase": "chat_start",
+      "question": "How does Victor Frankenstein react when the creature comes to life?",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785340989845,
+      "elapsed": 137221,
+      "phase": "tools_available",
+      "count": 23
+    },
+    {
+      "ts": 1785340989845,
+      "elapsed": 137221,
+      "phase": "grounding",
+      "sourceCount": 15,
+      "foldedCount": 1,
+      "tokens": 357,
+      "citationCount": 1,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 15 sources, 1 folded, 357 tokens, 1 citations"
+    },
+    {
+      "ts": 1785340989845,
+      "elapsed": 137221,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "qwen2.5-coder:7b",
+      "toolCount": 23,
+      "summary": "LLM call round 0: model=qwen2.5-coder:7b, tools=23"
+    },
+    {
+      "ts": 1785341025269,
+      "elapsed": 172645,
+      "phase": "response",
+      "model": "qwen2.5-coder:7b",
+      "contentLength": 235,
+      "contentPreview": "Victor Frankenstein's reaction when the creature comes to life is described as follows:\n\nVolcano bursting forth, his face would suddenly change to an expression\nof the wildest rage as he shrieked out ",
+      "summary": "Response (qwen2.5-coder:7b): Victor Frankenstein's reaction when the creature comes to life is described as follows:\n\nVolcano bur"
+    },
+    {
+      "ts": 1785341025272,
+      "elapsed": 172648,
+      "phase": "chat_complete",
+      "question": "How does Victor Frankenstein react when the creature comes to life?",
+      "duration": 37941,
+      "model": "qwen2.5-coder:7b",
+      "llmRounds": 1,
+      "toolCallCount": 0,
+      "groundingCitations": 1,
+      "citationsUsed": 1,
+      "sseEvents": 5,
+      "summary": "Chat done in 37941ms: model=qwen2.5-coder:7b, rounds=1, tools=0, grounding citations=1, response citations=1"
+    },
+    {
+      "ts": 1785341025273,
+      "elapsed": 172649,
+      "phase": "citation_audit",
+      "question": "How does Victor Frankenstein react when the creature comes t",
+      "available": [
+        "[1]"
+      ],
+      "used": [
+        "[1]"
+      ],
+      "grounded": true,
+      "summary": "Citations: available=[1], used=[1]"
+    },
+    {
+      "ts": 1785341025273,
+      "elapsed": 172649,
+      "phase": "chat_start",
+      "question": "What does Natasha Rostova feel at her first ball?",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785341029164,
+      "elapsed": 176540,
+      "phase": "tools_available",
+      "count": 23
+    },
+    {
+      "ts": 1785341029164,
+      "elapsed": 176540,
+      "phase": "grounding",
+      "sourceCount": 15,
+      "foldedCount": 1,
+      "tokens": 362,
+      "citationCount": 1,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 15 sources, 1 folded, 362 tokens, 1 citations"
+    },
+    {
+      "ts": 1785341029164,
+      "elapsed": 176540,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "qwen2.5-coder:7b",
+      "toolCount": 23,
+      "summary": "LLM call round 0: model=qwen2.5-coder:7b, tools=23"
+    },
+    {
+      "ts": 1785341065947,
+      "elapsed": 213323,
+      "phase": "response",
+      "model": "qwen2.5-coder:7b",
+      "contentLength": 128,
+      "contentPreview": "I'm sorry, but there is no information provided in the source material about Natasha Rostova feeling anything at her first ball.",
+      "summary": "Response (qwen2.5-coder:7b): I'm sorry, but there is no information provided in the source material about Natasha Rostova feeling"
+    },
+    {
+      "ts": 1785341065955,
+      "elapsed": 213331,
+      "phase": "chat_complete",
+      "question": "What does Natasha Rostova feel at her first ball?",
+      "duration": 40682,
+      "model": "qwen2.5-coder:7b",
+      "llmRounds": 1,
+      "toolCallCount": 0,
+      "groundingCitations": 1,
+      "citationsUsed": 0,
+      "sseEvents": 5,
+      "summary": "Chat done in 40682ms: model=qwen2.5-coder:7b, rounds=1, tools=0, grounding citations=1, response citations=0"
+    },
+    {
+      "ts": 1785341065956,
+      "elapsed": 213332,
+      "phase": "citation_audit",
+      "question": "What does Natasha Rostova feel at her first ball?",
+      "available": [
+        "[1]"
+      ],
+      "used": [],
+      "grounded": true,
+      "summary": "Citations: available=[1], used=none"
+    },
+    {
+      "ts": 1785341065956,
+      "elapsed": 213332,
+      "phase": "chat_start",
+      "question": "Who is Mr. Darcy and how does Elizabeth first meet him?",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785341069674,
+      "elapsed": 217050,
+      "phase": "tools_available",
+      "count": 23
+    },
+    {
+      "ts": 1785341069674,
+      "elapsed": 217050,
+      "phase": "grounding",
+      "sourceCount": 15,
+      "foldedCount": 1,
+      "tokens": 360,
+      "citationCount": 1,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 15 sources, 1 folded, 360 tokens, 1 citations"
+    },
+    {
+      "ts": 1785341069674,
+      "elapsed": 217050,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "qwen2.5-coder:7b",
+      "toolCount": 23,
+      "summary": "LLM call round 0: model=qwen2.5-coder:7b, tools=23"
+    },
+    {
+      "ts": 1785341108288,
+      "elapsed": 255664,
+      "phase": "response",
+      "model": "qwen2.5-coder:7b",
+      "contentLength": 167,
+      "contentPreview": "Mr. Darcy is a character in Jane Austen's novel \"Pride and Prejudice\". In the story, Elizabeth Bennet first meets Mr. Darcy at a ball hosted by her aunt and uncle. [2]",
+      "summary": "Response (qwen2.5-coder:7b): Mr. Darcy is a character in Jane Austen's novel \"Pride and Prejudice\". In the story, Elizabeth Benne"
+    },
+    {
+      "ts": 1785341108297,
+      "elapsed": 255673,
+      "phase": "chat_complete",
+      "question": "Who is Mr. Darcy and how does Elizabeth first meet him?",
+      "duration": 42341,
+      "model": "qwen2.5-coder:7b",
+      "llmRounds": 1,
+      "toolCallCount": 0,
+      "groundingCitations": 1,
+      "citationsUsed": 1,
+      "sseEvents": 5,
+      "summary": "Chat done in 42341ms: model=qwen2.5-coder:7b, rounds=1, tools=0, grounding citations=1, response citations=1"
+    },
+    {
+      "ts": 1785341108298,
+      "elapsed": 255674,
+      "phase": "citation_audit",
+      "question": "Who is Mr. Darcy and how does Elizabeth first meet him?",
+      "available": [
+        "[1]"
+      ],
+      "used": [
+        "[2]"
+      ],
+      "grounded": false,
+      "summary": "Citations: available=[1], used=[2]"
+    },
+    {
+      "ts": 1785341108298,
+      "elapsed": 255674,
+      "phase": "chat_start",
+      "question": "What transformation does Gregor Samsa undergo?",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785341111343,
+      "elapsed": 258719,
+      "phase": "tools_available",
+      "count": 23
+    },
+    {
+      "ts": 1785341111344,
+      "elapsed": 258720,
+      "phase": "grounding",
+      "sourceCount": 15,
+      "foldedCount": 1,
+      "tokens": 357,
+      "citationCount": 1,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 15 sources, 1 folded, 357 tokens, 1 citations"
+    },
+    {
+      "ts": 1785341111344,
+      "elapsed": 258720,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "qwen2.5-coder:7b",
+      "toolCount": 23,
+      "summary": "LLM call round 0: model=qwen2.5-coder:7b, tools=23"
+    },
+    {
+      "ts": 1785341117758,
+      "elapsed": 265134,
+      "phase": "response",
+      "model": "qwen2.5-coder:7b",
+      "contentLength": 187,
+      "contentPreview": "Gregor Samsa, a character from Franz Kafka's novella \"The Metamorphosis\", undergoes a transformation where he wakes up one morning to find himself transformed into an enormous insect. [3]",
+      "summary": "Response (qwen2.5-coder:7b): Gregor Samsa, a character from Franz Kafka's novella \"The Metamorphosis\", undergoes a transformation"
+    },
+    {
+      "ts": 1785341117764,
+      "elapsed": 265140,
+      "phase": "chat_complete",
+      "question": "What transformation does Gregor Samsa undergo?",
+      "duration": 9466,
+      "model": "qwen2.5-coder:7b",
+      "llmRounds": 1,
+      "toolCallCount": 0,
+      "groundingCitations": 1,
+      "citationsUsed": 1,
+      "sseEvents": 5,
+      "summary": "Chat done in 9466ms: model=qwen2.5-coder:7b, rounds=1, tools=0, grounding citations=1, response citations=1"
+    },
+    {
+      "ts": 1785341117764,
+      "elapsed": 265140,
+      "phase": "citation_audit",
+      "question": "What transformation does Gregor Samsa undergo?",
+      "available": [
+        "[1]"
+      ],
+      "used": [
+        "[3]"
+      ],
+      "grounded": false,
+      "summary": "Citations: available=[1], used=[3]"
+    },
+    {
+      "ts": 1785341117764,
+      "elapsed": 265140,
+      "phase": "chat_start",
+      "question": "Compare how Frankenstein's creature and Kafka's Gregor both experience isolation.",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785341120742,
+      "elapsed": 268118,
+      "phase": "tools_available",
+      "count": 23
+    },
+    {
+      "ts": 1785341120742,
+      "elapsed": 268118,
+      "phase": "grounding",
+      "sourceCount": 15,
+      "foldedCount": 1,
+      "tokens": 338,
+      "citationCount": 1,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 15 sources, 1 folded, 338 tokens, 1 citations"
+    },
+    {
+      "ts": 1785341120742,
+      "elapsed": 268118,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "qwen2.5-coder:7b",
+      "toolCount": 23,
+      "summary": "LLM call round 0: model=qwen2.5-coder:7b, tools=23"
+    },
+    {
+      "ts": 1785341156239,
+      "elapsed": 303615,
+      "phase": "response",
+      "model": "qwen2.5-coder:7b",
+      "contentLength": 198,
+      "contentPreview": "I'm sorry, but there is no information provided in the source material about Frankenstein's creature or Kafka's Gregor experiencing isolation. The passages you provided are from a different context.",
+      "summary": "Response (qwen2.5-coder:7b): I'm sorry, but there is no information provided in the source material about Frankenstein's creature"
+    },
+    {
+      "ts": 1785341156243,
+      "elapsed": 303619,
+      "phase": "chat_complete",
+      "question": "Compare how Frankenstein's creature and Kafka's Gregor both experience isolation",
+      "duration": 38479,
+      "model": "qwen2.5-coder:7b",
+      "llmRounds": 1,
+      "toolCallCount": 0,
+      "groundingCitations": 1,
+      "citationsUsed": 0,
+      "sseEvents": 5,
+      "summary": "Chat done in 38479ms: model=qwen2.5-coder:7b, rounds=1, tools=0, grounding citations=1, response citations=0"
+    },
+    {
+      "ts": 1785341156243,
+      "elapsed": 303619,
+      "phase": "citation_audit",
+      "question": "Compare how Frankenstein's creature and Kafka's Gregor both ",
+      "available": [
+        "[1]"
+      ],
+      "used": [],
+      "grounded": true,
+      "summary": "Citations: available=[1], used=none"
+    },
+    {
+      "ts": 1785341156243,
+      "elapsed": 303619,
+      "phase": "chat_start",
+      "question": "What themes of creation and responsibility appear across Frankenstein and the Bible?",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785341158968,
+      "elapsed": 306344,
+      "phase": "tools_available",
+      "count": 23
+    },
+    {
+      "ts": 1785341158968,
+      "elapsed": 306344,
+      "phase": "grounding",
+      "sourceCount": 15,
+      "foldedCount": 1,
+      "tokens": 346,
+      "citationCount": 1,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 15 sources, 1 folded, 346 tokens, 1 citations"
+    },
+    {
+      "ts": 1785341158968,
+      "elapsed": 306344,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "qwen2.5-coder:7b",
+      "toolCount": 23,
+      "summary": "LLM call round 0: model=qwen2.5-coder:7b, tools=23"
+    },
+    {
+      "ts": 1785341199580,
+      "elapsed": 346956,
+      "phase": "response",
+      "model": "qwen2.5-coder:7b",
+      "contentLength": 389,
+      "contentPreview": "The themes of creation and responsibility appear across Frankenstein and the Bible. In Frankenstein, Victor Frankenstein is seen as responsible for creating life through his experiments with electrici",
+      "summary": "Response (qwen2.5-coder:7b): The themes of creation and responsibility appear across Frankenstein and the Bible. In Frankenstein,"
+    },
+    {
+      "ts": 1785341199584,
+      "elapsed": 346960,
+      "phase": "chat_complete",
+      "question": "What themes of creation and responsibility appear across Frankenstein and the Bi",
+      "duration": 43341,
+      "model": "qwen2.5-coder:7b",
+      "llmRounds": 1,
+      "toolCallCount": 0,
+      "groundingCitations": 1,
+      "citationsUsed": 0,
+      "sseEvents": 5,
+      "summary": "Chat done in 43341ms: model=qwen2.5-coder:7b, rounds=1, tools=0, grounding citations=1, response citations=0"
+    },
+    {
+      "ts": 1785341199584,
+      "elapsed": 346960,
+      "phase": "citation_audit",
+      "question": "What themes of creation and responsibility appear across Fra",
+      "available": [
+        "[1]"
+      ],
+      "used": [],
+      "grounded": true,
+      "summary": "Citations: available=[1], used=none"
+    },
+    {
+      "ts": 1785341199584,
+      "elapsed": 346960,
+      "phase": "chat_start",
+      "question": "Describe the social dynamics at the ball where Natasha meets Andrei Bolkonsky.",
+      "sessionId": "audit-test"
+    },
+    {
+      "ts": 1785341202511,
+      "elapsed": 349887,
+      "phase": "tools_available",
+      "count": 23
+    },
+    {
+      "ts": 1785341202511,
+      "elapsed": 349887,
+      "phase": "grounding",
+      "sourceCount": 15,
+      "foldedCount": 1,
+      "tokens": 370,
+      "citationCount": 1,
+      "gaps": 1,
+      "empty": false,
+      "summary": "Grounding: 15 sources, 1 folded, 370 tokens, 1 citations"
+    },
+    {
+      "ts": 1785341202511,
+      "elapsed": 349887,
+      "phase": "llm_call",
+      "round": 0,
+      "model": "qwen2.5-coder:7b",
+      "toolCount": 23,
+      "summary": "LLM call round 0: model=qwen2.5-coder:7b, tools=23"
+    },
+    {
+      "ts": 1785341242829,
+      "elapsed": 390205,
+      "phase": "response",
+      "model": "qwen2.5-coder:7b",
+      "contentLength": 179,
+      "contentPreview": "I'm sorry, but there is no information provided in the source material about the ball where Natasha meets Andrei Bolkonsky. The passages you provided are from a different context.",
+      "summary": "Response (qwen2.5-coder:7b): I'm sorry, but there is no information provided in the source material about the ball where Natasha "
+    },
+    {
+      "ts": 1785341242834,
+      "elapsed": 390210,
+      "phase": "chat_complete",
+      "question": "Describe the social dynamics at the ball where Natasha meets Andrei Bolkonsky.",
+      "duration": 43250,
+      "model": "qwen2.5-coder:7b",
+      "llmRounds": 1,
+      "toolCallCount": 0,
+      "groundingCitations": 1,
+      "citationsUsed": 0,
+      "sseEvents": 5,
+      "summary": "Chat done in 43250ms: model=qwen2.5-coder:7b, rounds=1, tools=0, grounding citations=1, response citations=0"
+    },
+    {
+      "ts": 1785341242835,
+      "elapsed": 390211,
+      "phase": "citation_audit",
+      "question": "Describe the social dynamics at the ball where Natasha meets",
+      "available": [
+        "[1]"
+      ],
+      "used": [],
+      "grounded": true,
+      "summary": "Citations: available=[1], used=none"
+    },
+    {
+      "ts": 1785341242835,
+      "elapsed": 390211,
+      "phase": "phase",
+      "summary": "── Phase 9: Post-Chat Discourse State ──"
+    },
+    {
+      "ts": 1785341242895,
+      "elapsed": 390271,
+      "phase": "api_get",
+      "path": "/api/discourse/stats?session=audit-test",
+      "status": 200,
+      "duration": 60,
+      "sizeBytes": 126,
+      "summary": "/api/discourse/stats?session=audit-test → 200 (126B, 60ms)"
+    },
+    {
+      "ts": 1785341242920,
+      "elapsed": 390296,
+      "phase": "api_get",
+      "path": "/api/discourse?session=audit-test",
+      "status": 200,
+      "duration": 24,
+      "sizeBytes": 3056,
+      "summary": "/api/discourse?session=audit-test → 200 (3056B, 24ms)"
+    },
+    {
+      "ts": 1785341242920,
+      "elapsed": 390296,
+      "phase": "final_discourse",
+      "messageCount": 16,
+      "tokens": 593,
+      "usagePercent": 2,
+      "foldCount": 0,
+      "attachmentCount": 0,
+      "summary": "Final discourse: 16 msgs, 593 tokens, 0 folds"
+    },
+    {
+      "ts": 1785341242920,
+      "elapsed": 390296,
+      "phase": "phase",
+      "summary": "── Phase 10: Final State ──"
+    },
+    {
+      "ts": 1785341242961,
+      "elapsed": 390337,
+      "phase": "api_get",
+      "path": "/api/grounded/stats",
+      "status": 200,
+      "duration": 41,
+      "sizeBytes": 257,
+      "summary": "/api/grounded/stats → 200 (257B, 41ms)"
+    },
+    {
+      "ts": 1785341242965,
+      "elapsed": 390341,
+      "phase": "api_get",
+      "path": "/api/sources",
+      "status": 200,
+      "duration": 4,
+      "sizeBytes": 7365,
+      "summary": "/api/sources → 200 (7365B, 4ms)"
+    },
+    {
+      "ts": 1785341242966,
+      "elapsed": 390342,
+      "phase": "api_get",
+      "path": "/health",
+      "status": 200,
+      "duration": 1,
+      "sizeBytes": 51,
+      "summary": "/health → 200 (51B, 1ms)"
+    },
+    {
+      "ts": 1785341242966,
+      "elapsed": 390342,
+      "phase": "final_state",
+      "engineChunks": 5019,
+      "engineFiles": 38,
+      "sourceCount": 38,
+      "storeSize": 10001,
+      "summary": "Final: 5019 chunks, 38 sources, store=10001"
+    }
+  ],
+  "summary": {
+    "totalEvents": 114,
+    "phases": [
+      "proxy_start",
+      "proxy_ready",
+      "phase",
+      "api_get",
+      "import_start",
+      "api_post",
+      "import_done",
+      "engine_state",
+      "verbatim_search",
+      "segment_read",
+      "discourse_test",
+      "priors_catalog",
+      "priors_read",
+      "priors_search",
+      "chat_start",
+      "tools_available",
+      "grounding",
+      "llm_call",
+      "response",
+      "chat_complete",
+      "citation_audit",
+      "final_discourse",
+      "final_state"
+    ],
+    "errors": 0
+  }
+}
