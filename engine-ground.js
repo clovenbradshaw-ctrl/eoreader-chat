@@ -36,7 +36,9 @@ import {
 // This way a v1 host still links and the fold path reports a typed gap.
 import * as corpusFacade from "@eoreader/host/corpus";
 import { INDIVIDUATION_TYPES } from "@eoreader/engine/referents";
-import { coverageReport } from "@eoreader/engine";
+import { coverageReport, judge as relevanceJudge } from "@eoreader/engine";
+import { createGraph, readTriples } from "@eoreader/engine/emergence/graph";
+import { extractRelations } from "@eoreader/engine/perceiver/text/relations";
 import { loadCorefPrior, surfaceMatcher } from "./priors-bridge.js";
 
 // v2 is additive over v1 — it adds documentIds/documentText/sessionOutline/
@@ -127,7 +129,7 @@ function sourceMatcher(sourceFilter) {
   return (sp) => !!sp.source_id && bases.some((b) => sp.source_id.includes(b));
 }
 
-export function engineSearch(query, limit = 10, { maxChars = 800, source: sourceFilter, pool: poolName = DEFAULT_POOL } = {}) {
+export function engineSearch(query, limit = 10, { maxChars = 800, source: sourceFilter, pool: poolName = DEFAULT_POOL, preserve = true } = {}) {
   const s = ensureSession(poolName);
   let { spans, gaps } = searchSpans(s, { query, limit: Math.min(limit, 40) });
   const match = sourceMatcher(sourceFilter);
@@ -165,9 +167,85 @@ export function engineSearch(query, limit = 10, { maxChars = 800, source: source
         coverage: sp.coverage,
         phrase: sp.phrase,
         preview: sp.preview,
+        // Whether this span earns PRESERVATION — moves the reader's local
+        // belief beyond the neighbourhood's own reseeding. Refuse gates
+        // admission to belief, never use: a refused span is still shown.
+        preservation: preserve ? preservationOf(s, spans, sp) : undefined,
       };
     }),
     gaps,
+  };
+}
+
+// ── Preservation pass ──────────────────────────────────────────────────────
+//
+// Search nominates; preservation decides. Each matched span is judged against
+// a reader graph built from the OTHER matched spans, so its relations are
+// measured as an arrival against the reader's local belief rather than as a
+// restatement of its own ground (SEED amendment IV: relevance is local and
+// revisable — the ground is the neighbourhood, never the whole corpus).
+//
+// The organ is `judge` in eoreader6/packages/engine/search (EVA · Pattern),
+// placement sustained by the constitution routing assay; the gate never sees
+// the query and never scores the arrival. The engine holds no randomness
+// (III.2): reseeds (the resolution of the pattern-null) and seed are DECLARED
+// host numbers, never defaulted. Verdicts gate PRESERVATION (admission to the
+// reader's belief), never use — a refused span is still shown and citable.
+//
+// The host is a thin shell: it extracts triples (perceiver), builds the graph
+// (emergence), and calls the engine's judge. It changes no engine reading.
+
+const READER_GAMMA = 0.95; // the reader's rate of forgetting — declared, never defaulted
+const PRESERVATION_RESEEDS = 20; // resolution of the neighbourhood null — declared, never defaulted
+const PRESERVATION_SEED = 1; // the engine receives its randomness; the host declares it
+
+// extractRelations over a whole session is the dominant cost (≈1.4s on a full
+// corpus). Cached per session so a repeated query pays it once, and the cache
+// is keyed on the session object so it cannot leak across pools.
+const spanTripleCache = new WeakMap();
+
+function triplesOf(session, span) {
+  let m = spanTripleCache.get(session);
+  if (!m) {
+    m = new Map();
+    spanTripleCache.set(session, m);
+  }
+  let triples = m.get(span.span_id);
+  if (!triples) {
+    // The verbatim admitted text lives in the span registry; search results
+    // carry only a preview. Extract from the registry so the measurement sees
+    // the same value a reader would believe, never a truncated surface.
+    const rec = session.spans.get(span.span_id);
+    triples = extractRelations(rec?.text ?? span.text ?? span.preview ?? "");
+    m.set(span.span_id, triples);
+  }
+  return triples;
+}
+
+// The reader's local belief: the neighbourhood's triples, minus the candidate
+// itself — the candidate is never part of the ground it is measured against.
+function neighbourhoodGraph(session, candidates, exceptSpanId) {
+  const graph = createGraph({ gamma: READER_GAMMA });
+  for (const sp of candidates) {
+    if (sp.span_id === exceptSpanId) continue;
+    const triples = triplesOf(session, sp);
+    if (triples.length) readTriples(graph, triples);
+  }
+  return graph;
+}
+
+// The preservation record for one span against its matched neighbourhood.
+export function preservationOf(session, candidates, span) {
+  const candidate = triplesOf(session, span);
+  if (!candidate.length) return { verdict: "gap", gap: "empty_material", committed: false };
+  const graph = neighbourhoodGraph(session, candidates, span.span_id);
+  const record = relevanceJudge(graph, candidate, { reseeds: PRESERVATION_RESEEDS, seed: PRESERVATION_SEED });
+  return {
+    verdict: record.verdict,
+    gap: record.gap ?? null,
+    nullReseeds: record.nullReseeds,
+    committed: false,
+    counts: record.counts,
   };
 }
 
